@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>tokoku — Toko Klontong Perum GKR</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="app-header">
+  <img src="logo.png" alt="Logo tokoku" class="logo" onerror="this.style.display='none'">
+  <p class="header-tagline">Warga Perum GKR saja</p>
+  <div class="mode-switch" role="tablist" aria-label="Mode aplikasi">
+    <button id="modeWargaBtn" type="button" onclick="setMode('warga')">Warga</button>
+    <button id="modeAdminBtn" type="button" onclick="setMode('admin')">Admin</button>
+  </div>
+  <p id="storeStatus" class="store-status"></p>
+</header>
+
+<main id="view" class="view"></main>
+
+<!-- Bilah keranjang melayang (hanya di mode Warga / tab Belanja, diisi app.js) -->
+<div id="cartBar" class="cart-bar" hidden></div>
+
+<nav id="bottomNav" class="bottom-nav" aria-label="Navigasi utama"></nav>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- Modal umum: dipakai untuk alasan penolakan & riwayat transaksi -->
+<div id="modal" class="modal-overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <div id="modalBody"></div>
+    <button type="button" class="btn btn-secondary modal-close" onclick="closeModal()">Tutup</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
