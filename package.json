@@ -1,0 +1,1 @@
+{"description":"Aplikasi web toko klontong tokoku — khusus warga Perum GKR. Satu server Node.js (tanpa dependensi eksternal) melayani frontend dan API, data di SQLite.","engines":{"node":">=22"},"name":"tokoku","private":true,"scripts":{"start":"node server.js"},"version":"1.0.0"}

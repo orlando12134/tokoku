@@ -1,0 +1,19 @@
+# Blueprint Render untuk tokoku (dipakai bila deploy lewat Render).
+# Cara pakai: hubungkan repo GitHub ini di dashboard Render → New → Web Service
+# (atau New → Blueprint bila render.yaml terdeteksi otomatis).
+# PENTING: paket free Render memakai filesystem ephemeral — database SQLite
+# akan hilang setiap deploy/restart. Supaya data bertahan, perlu paket
+# Starter (berbayar) + persistent disk, atau pakai PostgreSQL terkelola.
+# Lihat README.md bagian "Deploy" untuk penjelasan lengkap.
+services:
+  - type: web
+    name: tokoku
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DB_PATH
+        value: /opt/render/project/src/data/tokoku.db
