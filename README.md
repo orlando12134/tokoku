@@ -66,6 +66,31 @@ Keduanya serverless — SQLite lokal tidak bertahan antar request, jadi
 perlu database eksternal (mis. Supabase Postgres gratis) dan penulisan
 ulang lapisan database. Hanya dipilih bila Andrik memang mau jalur itu.
 
+## Uji lokal (ringkasan hasil 2026-11-07 malam — 5 perbaikan dari versi Muse)
+
+Diuji end-to-end lewat HTTP + browser Chromium headless (lebar HP 390px)
+terhadap server lokal di port 3100 (database uji terpisah, sudah dihapus;
+database produksi tetap kosong, hash tidak berubah): **22 pemeriksaan
+browser lulus, 0 gagal.**
+
+- Splash awal Warga & Admin: layar hijau #166534 + logo + "Memuat…" +
+  tiga titik berputar (animasi `splash-spin`) tampil sebelum JS jalan,
+  hilang setelah render pertama; bukan layar hitam.
+- Live update tanpa refresh (polling 10 detik, maks tunggu ~15 detik):
+  pesanan baru warga muncul di Admin; status pesanan diubah admin ke
+  Diproses berubah di Warga; pengajuan top-up baru terlihat di Warga dan
+  saldo berubah Rp100.000 → Rp150.000 setelah disetujui; pesan chat admin
+  muncul di Warga; pendaftaran warga baru muncul di Admin; teks yang
+  sedang diketik di chat tidak hilang saat polling.
+- Teks peringatan saldo tampil persis: "Saldo tokoku tidak dapat di uangkan kembali. Saldo hanya bisa di pakai untuk belanja di tokoku, jadi isi secukupnya sesuai kebutuhan belanja Kamu".
+- Gambar tampil di Pesanan Saya (Warga) dan Pesanan (Admin); setelah
+  barang diubah admin (nama + gambar baru), pesanan tetap menampilkan
+  gambar dan nama snapshot lama.
+- Klik gambar produk → detail (foto besar, Rp17.000 + harga saldo
+  Rp15.000, stok 20) → pilih jumlah 3 → tambah ke keranjang (badge 3);
+  tombol +/- cepat di kartu tetap berfungsi (badge 3 → 4).
+- Lebar HP 390px: tidak ada overflow horizontal di Warga maupun Admin.
+
 ## Uji lokal (ringkasan hasil 2026-11-07 — setelah pemisahan Warga/Admin)
 
 Diuji end-to-end lewat HTTP + browser Chromium headless (lebar HP 390px)

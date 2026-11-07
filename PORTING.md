@@ -65,9 +65,32 @@ folder ini. Tujuannya: pembaruan berikutnya tidak dibangun ulang dari nol.
 | Alur layar, tombol, form, navigasi (warga) | `public/warga.js` (blok `// FITUR: ...`) |
 | Alur layar, tombol, form, navigasi (admin) | `public/admin.js` (blok `// FITUR: ...`) |
 | Alur layar, tombol, form, navigasi (bersama) | `public/common.js` (blok `// FITUR: ...`) |
+| Layar loading awal (splash hijau + logo + titik berputar) | `public/warga.html`, `public/admin.html` (elemen `#splash` + pengaman 15 detik), `public/style.css` (`.splash`, `.splash-orbit`), `public/common.js` (`hideSplash()`), `public/warga.js` / `public/admin.js` (panggil di akhir `render()`) |
+| Live update tanpa refresh (polling 10 detik, hanya bila berubah) | `public/warga.js` / `public/admin.js` (`startLivePoll()` / `pollLive()` + snapshot `lastLive`), `public/common.js` (`preserveScroll()`, `viewHasFormFocus()`, `chatBubblesHtml()`) |
+| Snapshot gambar di data pesanan | `server.js` (tambah `image` di tiap item saat `POST /api/orders`), `public/common.js` (`orderItemsHtml()`), `public/warga.js` / `public/admin.js` (pakai `orderItemsHtml()` di kartu pesanan) |
+| Detail produk (klik gambar) | `public/warga.js` (`openProductDetail()` / `renderProductDetail()` / `detailAddToCart()`), `public/style.css` (`.product-detail-*`, `.detail-qty-row`) |
 | Kolom/tabel baru | `server.js` (init database + migrasi) |
 | Endpoint baru | `server.js` + pemanggilnya di `public/common.js` / `public/warga.js` / `public/admin.js` |
 | Aset baru (logo, QRIS, foto) | `public/` + referensi di `public/warga.html` / `public/admin.html` |
+
+- **Pola live update (sejak 2026-11-07 malam).** Polling 10 detik di
+  `warga.js`/`admin.js` membandingkan `JSON.stringify` data baru dengan
+  snapshot `lastLive` dan hanya membangun ulang tampilan bila berubah;
+  `preserveScroll()` menjaga posisi scroll, `viewHasFormFocus()` menahan
+  pembangunan ulang saat formulir sedang diisi, dan chat hanya mengganti
+  isi `#chatBox` (bukan seluruh tampilan) supaya teks ketikan tidak hilang.
+  Jangan kembalikan interval chat per-tab yang membangun ulang seluruh
+  tampilan — itu yang dulu menghapus teks ketikan.
+- **Pola snapshot (sejak 2026-11-07 malam).** Data yang harus bertahan
+  walau sumbernya berubah/dihapus (mis. foto barang di pesanan) disimpan
+  sebagai snapshot di JSON pesanan saat dibuat (`server.js`), bukan dibaca
+  ulang dari katalog. Tidak perlu ubah skema DB selama field-nya sudah
+  berupa JSON string; pesanan lama tanpa field itu tetap bisa dibaca
+  (tampil tanpa gambar).
+- **Pola splash (sejak 2026-11-07 malam).** Elemen `#splash` ditulis
+  langsung di HTML sebelum `<script>` agar tampil sebelum JS jalan;
+  disembunyikan di akhir `render()` pertama (`hideSplash()`), dengan
+  pengaman `setTimeout` 15 detik di HTML bila JS gagal.
 
 ## Yang belum ada (ide untuk pembaruan berikutnya)
 

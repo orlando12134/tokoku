@@ -537,7 +537,10 @@ async function handleApi(req, res, pathname, query) {
       }
       const unitPrice = (payment === 'saldo' && product.specialPrice !== null && product.specialPrice !== undefined)
         ? product.specialPrice : product.price;
-      items.push({ productId, name: product.name, qty, price: unitPrice });
+      // FITUR: Snapshot gambar barang di data pesanan — supaya gambar tetap
+      // tampil di Pesanan Warga/Admin walau barangnya nanti diubah/dihapus.
+      // Tidak perlu ubah skema DB: items disimpan sebagai JSON string.
+      items.push({ productId, name: product.name, qty, price: unitPrice, image: product.image || null });
       subtotal += unitPrice * qty;
     }
 

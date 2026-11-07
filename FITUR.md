@@ -26,6 +26,43 @@ Admin. Tidak ada tombol ganti mode — warga hanya bisa membuka aplikasi
 Warga, admin membuka aplikasi Admin lewat `/admin`. Data tetap satu:
 pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 
+## Perbaikan 2026-11-07 (malam — 5 perbaikan dari versi Muse)
+
+- **Layar loading awal:** `#splash` statis di `warga.html`/`admin.html`
+  tampil sebelum JS jalan — background hijau #166534, logo tokoku, tulisan
+  "Memuat…", tiga titik berputar (animasi CSS murni, `.splash-orbit` di
+  `style.css`). Disembunyikan JS (`hideSplash()` di `common.js`) setelah
+  render pertama selesai; ada pengaman 15 detik di HTML bila JS gagal.
+  Bukan layar hitam.
+- **Live update tanpa refresh:** polling tiap 10 detik (`startLivePoll()` /
+  `pollLive()` di `warga.js` dan `admin.js`) untuk data tab yang sedang
+  dibuka — Admin: pesanan baru, top-up menunggu, verifikasi menunggu, chat;
+  Warga: status pesanan, status top-up, saldo, chat, status verifikasi.
+  Tampilan hanya dibangun ulang bila data benar-benar berubah (banding
+  `JSON.stringify` dengan snapshot terakhir); posisi scroll dijaga
+  (`preserveScroll()`); chat hanya mengganti kotak pesan bila ada pesan
+  baru sehingga teks yang sedang diketik tidak hilang; formulir yang
+  sedang diisi tidak dibangun ulang (`viewHasFormFocus()`). Tanpa
+  WebSocket (server tidak mendukungnya).
+- **Peringatan saldo (Warga):** menu Saldo menampilkan PERSIS (di bawah
+  angka saldo, di atas formulir top-up, kotak `.warn-box`):
+  "Saldo tokoku tidak dapat di uangkan kembali. Saldo hanya bisa di pakai
+  untuk belanja di tokoku, jadi isi secukupnya sesuai kebutuhan belanja Kamu".
+- **Gambar di pesanan:** server menyimpan snapshot gambar barang di data
+  pesanan saat pesanan dibuat (`image` di tiap item `orders.items`,
+  `server.js`) — gambar tetap tampil di Pesanan Saya (Warga) dan Pesanan
+  (Admin) walau barangnya nanti diubah/dihapus admin. Pesanan lama tanpa
+  snapshot tampil tanpa gambar. Tidak perlu ubah skema DB (items sudah
+  JSON string), jadi tidak ada migrasi.
+- **Klik gambar produk (Belanja Warga):** gambar (dan nama) produk bisa
+  diklik — membuka detail produk (foto besar, nama, harga normal + harga
+  spesial saldo, stok, kategori) dengan pilihan jumlah, lalu tombol
+  "Tambah ke keranjang" dengan jumlah itu (`openProductDetail()` di
+  `warga.js`, memakai modal umum). Tombol +/- cepat di kartu produk tetap
+  berfungsi seperti biasa.
+- **Catatan:** produk tidak punya kolom deskripsi di skema publik, jadi
+  detail produk menampilkan kategori bila ada (bukan deskripsi).
+
 ## Perbaikan 2026-11-07 (bug situs tidak bisa dipakai + pemisahan)
 
 - **Bug modal (penyebab situs tidak bisa dipakai):** `.modal-overlay`
@@ -73,12 +110,13 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 
 ### Saldo dan top-up
 - [x] Top-up via QRIS (gambar atas nama Toko Khayla, NMID ID1022215364889, A01), transfer, atau tunai; admin menyetujui.
-- [x] Halaman saldo menampilkan jelas "Saldo tokoku tidak dapat diuangkan kembali".
+- [x] Halaman saldo menampilkan peringatan persis: "Saldo tokoku tidak dapat di uangkan kembali. Saldo hanya bisa di pakai untuk belanja di tokoku, jadi isi secukupnya sesuai kebutuhan belanja Kamu" (kotak peringatan di bawah angka saldo, di atas formulir top-up).
 - [x] Tidak bisa mengajukan top-up baru sebelum pengajuan lama disetujui (form diganti pemberitahuan; server juga menolak).
 - [x] Penolakan top-up memakai kotak alasan; alasan tampil ke warga.
 
 ### Pesanan
 - [x] Diantar ke rumah (ongkir Rp2.000, bisa diubah admin; gratis kalau ambil di toko) atau ambil di toko.
+- [x] Foto barang tampil di tiap baris barang pada kartu pesanan (Warga "Pesanan saya" dan Pesanan Admin), dari snapshot saat pesanan dibuat — tetap tampil walau barang diubah/dihapus admin; pesanan lama tanpa snapshot tampil tanpa gambar.
 - [x] Wajib pilih jam: 09.00-10.00, 11.00-12.00, 16.00-17.00, 19.00-20.00; jam tampil di kartu pesanan.
 - [x] Bayar pakai saldo (memakai harga spesial bila ada) atau tunai (catatan "Mohon bayar dengan uang pas" di menu bayar dan kartu pesanan).
 - [x] Catatan untuk toko, contoh "cth. Tolong di taruh di kranjang paket".
@@ -90,9 +128,15 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 ### Chat
 - [x] Chat Admin–Warga: kirim teks dan gambar (lampirkan, pratinjau, tampil di gelembung).
 - [x] Lencana jumlah pesan belum dibaca di kedua sisi; tertandai terbaca saat percakapan dibuka.
+- [x] Pesan baru muncul tanpa refresh (polling 10 detik); teks yang sedang diketik tidak hilang saat polling.
 
 ### Toko buka/tutup
 - [x] Saklar di Beranda Admin (bawaan buka); saat tutup, warga tidak bisa melihat etalase dan tidak bisa memesan (server menolak pesanan baru).
+
+### Loading awal & live update
+- [x] Layar loading hijau (#166534) + logo + "Memuat…" + titik berputar tampil sebelum JS jalan di Warga dan Admin, hilang setelah render pertama (bukan layar hitam).
+- [x] Live update tanpa refresh (polling 10 detik, hanya bila data berubah, scroll dijaga): pesanan/top-up/verifikasi/chat di Admin; status pesanan, status top-up, saldo, dan chat di Warga.
+- [x] Klik gambar/nama produk di katalog Belanja membuka detail produk (foto besar, harga normal + harga spesial saldo, stok, kategori) dengan pilihan jumlah dan tombol "Tambah ke keranjang"; tombol +/- cepat di kartu tetap berfungsi.
 
 ## Batasan yang diketahui
 - Aplikasi Admin dibuka lewat URL `/admin` tanpa kata sandi — siapa pun
