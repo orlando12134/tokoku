@@ -7,6 +7,16 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<!-- FITUR: Layar loading awal — tampil SEBELUM JS jalan (hijau #166534,
+     logo tokoku, tulisan "Memuat…", tiga titik berputar CSS murni).
+     Disembunyikan JS setelah render pertama selesai; ada pengaman 15 detik
+     bila JS gagal. Bukan layar hitam. -->
+<div id="splash" class="splash">
+  <img src="logo.png" alt="Logo tokoku" class="splash-logo" onerror="this.style.display='none'">
+  <p class="splash-text">Memuat…</p>
+  <div class="splash-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
+</div>
+<script>setTimeout(function(){var s=document.getElementById('splash');if(s)s.hidden=true;},15000);</script>
 <header class="app-header">
   <img src="logo.png" alt="Logo tokoku" class="logo" onerror="this.style.display='none'">
   <p class="header-tagline">Admin Toko</p>

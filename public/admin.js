@@ -16,6 +16,10 @@ var productEditId = null;
 var adminChatWargaId = null;
 var adminOrderFilter = { date: '', slot: '' };
 var lastAdminChatKey = '';
+// FITUR: Live update tanpa refresh — polling 10 detik, snapshot terakhir
+// tiap tab; tampilan hanya diperbarui bila data benar-benar berubah.
+var liveTimer = null;
+var lastLive = { home: '', orders: '', warga: '', topups: '', threads: '', products: '', settings: '', unread: null };
 
 function isApproved(w) { if (!w) return false; var s = String(w.status || '').toLowerCase(); return s === 'approved' || s === 'verified' || s === 'active' || w.approved === 1 || w.approved === true || w.verified === 1; }
 function isPending(w) { if (!w) return false; var s = String(w.status || '').toLowerCase(); return s === 'pending' || s === 'menunggu' || s === 'waiting'; }
@@ -23,7 +27,7 @@ function rejectReason(w) { return (w && (w.rejectReason || w.rejectionReason || 
 
 function setTab(t) {
   adminTab = t;
-  stopChatPoll(); render();
+  render();
 }
 
 // FITUR: lencana pesan belum dibaca (admin — total semua thread)
@@ -49,6 +53,94 @@ async function render() {
   else if (adminTab === 'warga') await renderAdminWarga(view);
   else if (adminTab === 'topup') await renderAdminTopup(view);
   else if (adminTab === 'chat') await renderAdminChat(view);
+  // FITUR: Layar loading awal — sembunyikan splash hijau setelah render pertama.
+  hideSplash();
+  // FITUR: Live update tanpa refresh — catat snapshot data saat ini.
+  lastLive.products = JSON.stringify(products);
+  lastLive.settings = JSON.stringify(settings);
+  lastLive.unread = unreadAdminTotal;
+}
+
+// FITUR: Live update tanpa refresh — polling tiap 10 detik untuk data tab
+// yang sedang dibuka. Hanya memperbarui tampilan bila data benar-benar
+// berubah (banding JSON.stringify dengan snapshot terakhir); posisi scroll
+// dijaga; input chat tidak disentuh (hanya kotak pesan yang diganti bila
+// ada pesan baru); formulir yang sedang diisi tidak dibangun ulang.
+// Tanpa WebSocket (server tidak mendukungnya).
+function startLivePoll() {
+  if (liveTimer) return;
+  liveTimer = setInterval(pollLive, 10000);
+}
+async function pollLive() {
+  try {
+    var threads = await api('/chat/threads');
+    var un = 0;
+    (threads || []).forEach(function (t) { un += Number(t.unreadAdmin) || 0; });
+    if (un !== lastLive.unread) { unreadAdminTotal = un; lastLive.unread = un; renderNav(); }
+    if (adminTab === 'beranda') {
+      var orders = await api('/orders');
+      var topups = await api('/topup/pending');
+      var wargaList = await api('/admin/warga');
+      var key = JSON.stringify([orders, topups, wargaList, products, settings]);
+      if (key !== lastLive.home) {
+        lastLive.home = key;
+        if (viewHasFormFocus()) return; // jangan hapus isian ongkir yang sedang diketik
+        await preserveScroll(function () { return renderAdminHome($('view')); });
+      }
+    } else if (adminTab === 'barang') {
+      var ps = await api('/products');
+      if (JSON.stringify(ps) !== lastLive.products) {
+        products = ps; lastLive.products = JSON.stringify(ps);
+        if (productEditId) return; // sedang ubah barang — jangan bangun ulang form
+        if (viewHasFormFocus()) return;
+        await preserveScroll(function () { renderAdminProducts($('view')); });
+      }
+    } else if (adminTab === 'pesanan') {
+      var q = '';
+      if (adminOrderFilter.date) q += (q ? '&' : '?') + 'date=' + encodeURIComponent(adminOrderFilter.date);
+      if (adminOrderFilter.slot) q += (q ? '&' : '?') + 'slot=' + encodeURIComponent(adminOrderFilter.slot);
+      var ords = await api('/orders' + q);
+      var ok = JSON.stringify(ords);
+      if (ok !== lastLive.orders) {
+        lastLive.orders = ok;
+        await preserveScroll(function () { return renderAdminOrders($('view')); });
+      }
+    } else if (adminTab === 'warga') {
+      var wl = await api('/admin/warga');
+      var wk = JSON.stringify(wl);
+      if (wk !== lastLive.warga) {
+        lastLive.warga = wk;
+        await preserveScroll(function () { return renderAdminWarga($('view')); });
+      }
+    } else if (adminTab === 'topup') {
+      var tp = await api('/topup/pending');
+      var tk = JSON.stringify(tp);
+      if (tk !== lastLive.topups) {
+        lastLive.topups = tk;
+        await preserveScroll(function () { return renderAdminTopup($('view')); });
+      }
+    } else if (adminTab === 'chat') {
+      if (adminChatWargaId) {
+        var d = await api('/chat/' + adminChatWargaId);
+        var key2 = (d.messages || []).map(function (m) { return m.id; }).join(',');
+        if (key2 !== lastAdminChatKey) {
+          lastAdminChatKey = key2;
+          var box = $('chatBox');
+          if (box) {
+            var nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+            box.innerHTML = chatBubblesHtml(d.messages || [], 'admin') || '<p class="muted">Belum ada pesan.</p>';
+            if (nearBottom) box.scrollTop = box.scrollHeight;
+          }
+        }
+      } else {
+        var th = JSON.stringify(threads);
+        if (th !== lastLive.threads) {
+          lastLive.threads = th;
+          await preserveScroll(function () { return renderAdminChat($('view')); });
+        }
+      }
+    }
+  } catch (e) { /* polling gagal sesaat — coba lagi 10 detik berikut */ }
 }
 
 function renderNav() {
@@ -69,6 +161,7 @@ async function renderAdminHome(view) {
   if (!Array.isArray(orders)) orders = [];
   if (!Array.isArray(topups)) topups = [];
   if (!Array.isArray(wargaList)) wargaList = [];
+  lastLive.home = JSON.stringify([orders, topups, wargaList, products, settings]);
   var newOrders = orders.filter(function (o) { return orderStatusRaw(o.status) === 'baru'; }).length;
   var pendingWarga = wargaList.filter(function (w) { return isPending(w); }).length;
   var lowStock = products.filter(function (p) { return Number(p.stock || 0) <= 5; }).length;
@@ -156,6 +249,7 @@ async function renderAdminOrders(view) {
   var orders = [];
   try { orders = await api('/orders' + q); } catch (e) { toast('Gagal memuat pesanan: ' + e.message, false); }
   if (!Array.isArray(orders)) orders = [];
+  lastLive.orders = JSON.stringify(orders);
   view.innerHTML = '<h1>Pesanan</h1><div class="card"><h2>Pencarian</h2>' +
     '<label>Tanggal pesanan</label><input id="ordDate" type="date" value="' + esc(adminOrderFilter.date) + '">' +
     '<label>Jam antar / ambil</label><select id="ordSlot"><option value="">Semua jam</option>' + SLOTS.map(function (s) { return '<option ' + (adminOrderFilter.slot === s ? 'selected' : '') + '>' + s + '</option>'; }).join('') + '</select>' +
@@ -167,11 +261,11 @@ async function renderAdminOrders(view) {
       var rawStatus = orderStatusRaw(o.status);
       var status = orderStatusLabel(rawStatus);
       var next = rawStatus === 'baru' ? { send: 'diproses', label: 'Diproses' } : (rawStatus === 'diproses' ? { send: 'selesai', label: 'Selesai' } : null);
-      // PERBAIKAN: items dari API berupa JSON string (kolom TEXT SQLite).
-      var itemsTxt = parseItems(o.items).map(function (it) { var p = findProduct(it.productId); return (p ? p.name : 'Barang #' + it.productId) + ' × ' + it.qty; }).join(', ');
+      // FITUR: Gambar barang di pesanan — dari snapshot di data pesanan
+      // (orderItemsHtml), tetap tampil walau barang diubah/dihapus admin.
       return '<div class="card"><div class="row-between"><b>Pesanan #' + esc(o.id) + '</b><span class="status-pill status-' + esc(status) + '">' + esc(status) + '</span></div>' +
         '<p class="muted">' + fmtDate(o.createdAt || o.date) + ' · ' + esc(o.method === 'antar' ? 'Diantar' : 'Ambil') + ' · ' + esc(o.slot || '') + ' · ' + esc(o.payment === 'saldo' ? 'Saldo' : 'Tunai') + '</p>' +
-        '<p>' + esc(itemsTxt) + '</p><p><b>Total: ' + fmtRp(o.total) + '</b>' + (o.note ? '<br><span class="muted">Catatan: ' + esc(o.note) + '</span>' : '') + '</p>' +
+        orderItemsHtml(o.items) + '<p><b>Total: ' + fmtRp(o.total) + '</b>' + (o.note ? '<br><span class="muted">Catatan: ' + esc(o.note) + '</span>' : '') + '</p>' +
         '<div class="row">' + (next ? '<button type="button" class="btn btn-small" onclick="setOrderStatus(' + o.id + ',\'' + next.send + '\')">Ubah ke ' + next.label + '</button>' : '') +
         '<button type="button" class="btn btn-secondary btn-small" onclick="window.open(\'/api/orders/' + o.id + '/struk\',\'_blank\')">Cetak struk</button></div></div>';
     }).join('') : '<div class="card"><p>Tidak ada pesanan untuk pencarian ini.</p></div>');
@@ -187,6 +281,7 @@ async function renderAdminWarga(view) {
   var list = [];
   try { list = await api('/admin/warga'); } catch (e) { toast('Gagal memuat warga: ' + e.message, false); }
   if (!Array.isArray(list)) list = [];
+  lastLive.warga = JSON.stringify(list);
   view.innerHTML = '<h1>Warga</h1>' + (list.length ? list.map(function (w) {
     var st = w.status || '';
     return '<div class="card"><b>' + esc(w.name) + '</b> <span class="status-pill">' + esc(st) + '</span>' +
@@ -225,6 +320,7 @@ async function renderAdminTopup(view) {
   var list = [];
   try { list = await api('/topup/pending'); } catch (e) { toast('Gagal memuat top-up: ' + e.message, false); }
   if (!Array.isArray(list)) list = [];
+  lastLive.topups = JSON.stringify(list);
   view.innerHTML = '<h1>Top-up Menunggu</h1>' + (list.length ? list.map(function (t) {
     return '<div class="card"><b>' + fmtRp(t.amount) + '</b> <span class="status-pill">' + esc(t.method || '') + '</span>' +
       '<p class="muted">' + esc(t.wargaName || t.name || ('Warga #' + t.wargaId)) + ' · ' + fmtDate(t.createdAt) + '</p>' +
@@ -249,6 +345,7 @@ async function renderAdminChat(view) {
   var threads = [];
   try { threads = await api('/chat/threads'); } catch (e) { toast('Gagal memuat chat: ' + e.message, false); }
   if (!Array.isArray(threads)) threads = [];
+  lastLive.threads = JSON.stringify(threads);
   view.innerHTML = '<h1>Chat Warga</h1>' + (threads.length ? threads.map(function (t) {
     // PERBAIKAN: lastMessage dari API berupa objek {text,image,...}, bukan string.
     var lm = t.lastMessage;
@@ -266,30 +363,21 @@ async function renderAdminChatThread(view, wargaId) {
   var name = '';
   try { var threads = await api('/chat/threads'); var th = (threads || []).find(function (t) { return String(t.wargaId) === String(wargaId); }); if (th) name = th.wargaName || ''; } catch (e) {}
   view.innerHTML = '<button type="button" class="btn btn-secondary btn-small" onclick="adminChatWargaId=null;render()">← Semua chat</button>' +
-    '<h1>Chat — ' + esc(name || ('Warga #' + wargaId)) + '</h1><div class="card"><div class="chat-box">' +
-    (msgs.length ? msgs.map(function (m) {
-      var mine = m.sender === 'admin';
-      return '<div class="bubble' + (mine ? ' mine' : '') + '">' + (m.text ? esc(m.text) : '') + (m.image ? '<img src="' + esc(m.image) + '" alt="Gambar chat">' : '') +
-        '<div class="muted" style="font-size:11px">' + fmtDate(m.createdAt) + '</div></div>';
-    }).join('') : '<p class="muted">Belum ada pesan.</p>') + '</div>' +
+    '<h1>Chat — ' + esc(name || ('Warga #' + wargaId)) + '</h1><div class="card"><div class="chat-box" id="chatBox">' +
+    (msgs.length ? chatBubblesHtml(msgs, 'admin') : '<p class="muted">Belum ada pesan.</p>') + '</div>' +
     '<div id="chatPreview" class="img-preview"></div>' +
     '<div class="chat-input-row"><label class="btn btn-secondary btn-small" style="padding:9px 12px">📎<input type="file" accept="image/*" hidden onchange="onChatImageChange(this)"></label>' +
     '<input type="text" id="chatText" placeholder="Tulis balasan..." onkeydown="if(event.key===\'Enter\')sendAdminChat()">' +
     '<button type="button" class="btn" onclick="sendAdminChat()">Kirim</button></div></div>';
   try { await api('/chat/' + wargaId + '/read', { method: 'POST', body: { by: 'admin' } }); unreadAdminTotal = 0; renderNav(); } catch (e) {}
-  stopChatPoll();
-  // Perbarui hanya bila ada pesan baru — supaya teks yang sedang diketik tidak hilang tiap 10 detik
-  chatPoll = setInterval(async function () {
-    if (adminTab !== 'chat' || !adminChatWargaId) return;
-    try {
-      var d = await api('/chat/' + adminChatWargaId);
-      var key = (d.messages || []).map(function (m) { return m.id; }).join(',');
-      if (key !== lastAdminChatKey) { var v = $('view'); if (v) await renderAdminChatThread(v, adminChatWargaId); }
-    } catch (e) {}
-  }, 10000);
+  // FITUR: Live update tanpa refresh — polling chat ditangani polling global
+  // 10 detik (pollLive): hanya kotak pesan yang diganti bila ada pesan baru,
+  // input ketik tidak disentuh.
 }
 async function sendAdminChat() { if (adminChatWargaId) await sendChat('admin', adminChatWargaId); }
 
 // ---------- Start ----------
+// FITUR: Live update tanpa refresh — polling global tiap 10 detik.
 document.addEventListener('DOMContentLoaded', render);
 render();
+startLivePoll();

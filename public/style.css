@@ -14,6 +14,36 @@
   --nav-h: 62px;
 }
 html, body { margin: 0; padding: 0; }
+/* FITUR: Layar loading awal — hijau tokoku (#166534) + logo + titik berputar.
+   Elemen #splash ada di warga.html/admin.html SEBELUM script jalan, jadi
+   tampil langsung saat halaman dibuka; disembunyikan JS setelah render
+   pertama selesai. Bukan layar hitam. */
+.splash { position: fixed; inset: 0; z-index: 200; background: #166534; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
+.splash-logo { width: 120px; border-radius: 12px; }
+.splash-text { margin: 0; font-size: 18px; font-weight: 700; }
+.splash-orbit { position: relative; width: 54px; height: 54px; animation: splash-spin 1.1s linear infinite; }
+.splash-orbit span { position: absolute; width: 12px; height: 12px; border-radius: 50%; background: #ffd75e; }
+.splash-orbit span:nth-child(1) { top: 0; left: 50%; margin-left: -6px; }
+.splash-orbit span:nth-child(2) { bottom: 6px; left: 2px; }
+.splash-orbit span:nth-child(3) { bottom: 6px; right: 2px; }
+@keyframes splash-spin { to { transform: rotate(360deg); } }
+
+/* FITUR: Baris barang di kartu pesanan — foto snapshot + nama + jumlah */
+.order-items { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.order-item { display: flex; gap: 10px; align-items: center; }
+.order-item img { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; background: #f3f4f6; flex: none; }
+.order-item .order-item-info { min-width: 0; }
+.order-item .order-item-price { margin-left: auto; white-space: nowrap; font-weight: 700; }
+
+/* FITUR: Detail produk — gambar bisa diklik di katalog */
+.product-card img.clickable { cursor: pointer; }
+.product-detail-img { width: 100%; max-height: 260px; object-fit: cover; border-radius: 12px; background: #f3f4f6; margin-bottom: 10px; }
+.product-detail-price { font-size: 18px; font-weight: 800; color: var(--green-dark); }
+.product-detail-special { color: var(--gold); font-weight: 700; }
+.detail-qty-row { display: flex; gap: 10px; align-items: center; justify-content: center; margin: 14px 0; }
+.detail-qty-row button { width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: #fff; font-weight: 800; font-size: 18px; }
+.detail-qty-row b { font-size: 18px; min-width: 32px; text-align: center; }
+
 /* PERBAIKAN BUG MODAL (2026-11-07): elemen ber-atribut hidden harus selalu
    tersembunyi, walau class-nya punya display sendiri (.modal-overlay dan
    .cart-bar memakai display:flex yang mengalahkan display:none bawaan

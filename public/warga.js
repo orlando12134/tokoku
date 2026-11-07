@@ -14,6 +14,12 @@ var wargaTab = 'belanja';
 var authView = 'login'; // 'login' | 'register'
 var unreadWarga = 0;
 var lastChatKey = '';
+// FITUR: Live update tanpa refresh — polling 10 detik, snapshot terakhir
+// tiap tab; tampilan hanya diperbarui bila data benar-benar berubah.
+var liveTimer = null;
+var lastLive = { orders: '', balance: null, topupPending: null, warga: '', products: '', settings: '', unread: null };
+var detailProductId = null;
+var detailQty = 1;
 
 try {
   warga = JSON.parse(localStorage.getItem('tokoku_warga') || 'null');
@@ -43,7 +49,7 @@ async function refreshWarga() {
 
 function setTab(t) {
   wargaTab = t;
-  stopChatPoll(); render();
+  render();
 }
 
 // FITUR: lencana pesan belum dibaca (warga)
@@ -55,6 +61,76 @@ async function refreshUnread() {
       unreadWarga = (c && c.unreadWarga) || 0;
     }
   } catch (e) {}
+}
+
+// FITUR: Live update tanpa refresh — polling tiap 10 detik untuk data
+// tab yang sedang dibuka. Hanya memperbarui tampilan bila data
+// benar-benar berubah (banding JSON.stringify dengan snapshot terakhir);
+// posisi scroll dijaga; input chat tidak disentuh (hanya kotak pesan yang
+// diganti bila ada pesan baru); formulir yang sedang diisi tidak dibangun
+// ulang. Tanpa WebSocket (server tidak mendukungnya).
+function startLivePoll() {
+  if (liveTimer) return;
+  liveTimer = setInterval(pollLive, 10000);
+}
+async function pollLive() {
+  if (!warga || !warga.phone) return;
+  try {
+    // Status warga (disetujui/ditolak admin) — berlaku di semua tab.
+    var r = await api('/login', { method: 'POST', body: { phone: warga.phone } });
+    if (r.found && r.warga) {
+      var wk = JSON.stringify(r.warga);
+      if (wk !== lastLive.warga) { warga = r.warga; saveLocal(); render(); return; }
+    }
+    if (!isApproved(warga)) return;
+    // Lencana chat belum dibaca.
+    var c = await api('/chat/' + warga.id);
+    var un = (c && c.unreadWarga) || 0;
+    if (un !== lastLive.unread) { unreadWarga = un; lastLive.unread = un; renderNav(); }
+    if (wargaTab === 'belanja') {
+      var ps = await api('/products');
+      var ss = await api('/settings');
+      if (JSON.stringify(ps) !== lastLive.products || JSON.stringify(ss) !== lastLive.settings) {
+        products = ps; settings = ss; await preserveScroll(function () { renderShop($('view')); updateCartBar(); });
+        lastLive.products = JSON.stringify(ps); lastLive.settings = JSON.stringify(ss);
+      }
+    } else if (wargaTab === 'pesanan') {
+      var orders = await api('/warga/' + warga.id + '/orders');
+      var ok = JSON.stringify(orders);
+      if (ok !== lastLive.orders) {
+        lastLive.orders = ok;
+        await preserveScroll(function () { return renderWargaOrders($('view')); });
+      }
+    } else if (wargaTab === 'saldo') {
+      var b = await api('/warga/' + warga.id + '/balance');
+      var s = await api('/warga/' + warga.id + '/topup-status');
+      var bal = (b && b.balance) || 0;
+      var pend = !!(s && s.hasPending);
+      if (bal !== lastLive.balance || pend !== lastLive.topupPending) {
+        lastLive.balance = bal; lastLive.topupPending = pend;
+        if (viewHasFormFocus()) return; // jangan hapus isian top-up yang sedang diketik
+        await preserveScroll(function () { return renderSaldo($('view')); });
+      }
+    } else if (wargaTab === 'chat') {
+      var key = (c.messages || []).map(function (m) { return m.id; }).join(',');
+      if (key !== lastChatKey) {
+        lastChatKey = key;
+        var box = $('chatBox');
+        if (box) {
+          var nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+          box.innerHTML = chatBubblesHtml(c.messages || [], 'warga') || '<p class="muted">Belum ada pesan. Sapa toko di bawah.</p>';
+          if (nearBottom) box.scrollTop = box.scrollHeight;
+        }
+      }
+    } else if (wargaTab === 'keranjang') {
+      var ps2 = await api('/products');
+      if (JSON.stringify(ps2) !== lastLive.products) {
+        products = ps2; lastLive.products = JSON.stringify(ps2);
+        if (viewHasFormFocus()) return;
+        await preserveScroll(function () { renderCartView($('view')); });
+      }
+    }
+  } catch (e) { /* polling gagal (mis. offline sesaat) — coba lagi 10 detik berikut */ }
 }
 
 async function render() {
@@ -74,6 +150,16 @@ async function render() {
   else if (wargaTab === 'chat') await renderWargaChat(view);
   else if (wargaTab === 'akun') renderAccount(view);
   updateCartBar();
+  // FITUR: Layar loading awal — sembunyikan splash hijau setelah render
+  // pertama selesai (render berikutnya tidak berpengaruh).
+  hideSplash();
+  // FITUR: Live update tanpa refresh — catat snapshot data saat ini supaya
+  // polling 10 detik hanya membangun ulang bila ada yang berubah.
+  // (orders/saldo dicatat di renderWargaOrders/renderSaldo.)
+  lastLive.warga = JSON.stringify(warga);
+  lastLive.products = JSON.stringify(products);
+  lastLive.settings = JSON.stringify(settings);
+  lastLive.unread = unreadWarga;
 }
 
 function renderNav() {
@@ -163,8 +249,10 @@ function renderShop(view) {
     var qty = inCart ? inCart.qty : 0;
     var special = (p.specialPrice != null && Number(p.specialPrice) > 0) ? '<div class="product-special">Harga saldo: ' + fmtRp(p.specialPrice) + '</div>' : '';
     return '<div class="product-card">' +
-      (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.name) + '" onerror="this.style.display=\'none\'">' : '') +
-      '<div class="product-name">' + esc(p.name) + '</div>' +
+      // FITUR: Klik gambar produk — buka detail produk (foto besar, harga,
+      // stok, pilih jumlah, tambah ke keranjang). Tombol +/- cepat tetap ada.
+      (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.name) + '" class="clickable" onclick="openProductDetail(' + JSON.stringify(p.id) + ')" onerror="this.style.display=\'none\'">' : '') +
+      '<div class="product-name" style="cursor:pointer" onclick="openProductDetail(' + JSON.stringify(p.id) + ')">' + esc(p.name) + '</div>' +
       '<div class="product-price">' + fmtRp(p.price) + '</div>' + special +
       '<div class="muted" style="font-size:12px">Stok: ' + esc(p.stock) + (p.category ? ' · ' + esc(p.category) : '') + '</div>' +
       '<div class="qty-row"><button type="button" onclick="changeQty(' + JSON.stringify(p.id) + ',-1)" aria-label="Kurangi">−</button><b>' + qty + '</b>' +
@@ -184,6 +272,50 @@ function changeQty(productId, delta) {
   if (next <= 0) cart = cart.filter(function (c) { return String(c.productId) !== String(productId); });
   else if (item) item.qty = next; else cart.push({ productId: productId, qty: next });
   saveLocal(); render();
+}
+
+// FITUR: Detail produk — klik gambar/nama di katalog membuka modal berisi
+// foto besar, nama, harga normal + harga spesial saldo, stok, kategori,
+// pilihan jumlah, lalu tombol "Tambah ke keranjang" dengan jumlah itu.
+// Tombol +/- cepat di kartu produk tetap berfungsi seperti biasa.
+function openProductDetail(productId) {
+  var p = findProduct(productId); if (!p) return;
+  detailProductId = p.id;
+  var inCart = cart.find(function (c) { return String(c.productId) === String(p.id); });
+  detailQty = inCart ? inCart.qty : 1;
+  if (detailQty < 1) detailQty = 1;
+  if (detailQty > Number(p.stock || 0)) detailQty = Math.max(Number(p.stock || 0), 0);
+  renderProductDetail();
+}
+function renderProductDetail() {
+  var p = findProduct(detailProductId); if (!p) { closeModal(); return; }
+  var stock = Number(p.stock || 0);
+  var special = (p.specialPrice != null && Number(p.specialPrice) > 0)
+    ? '<div class="product-detail-special">Harga spesial bayar pakai saldo: ' + fmtRp(p.specialPrice) + '</div>' : '';
+  openModal('<h2>' + esc(p.name) + '</h2>' +
+    (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.name) + '" class="product-detail-img" onerror="this.style.display=\'none\'">' : '') +
+    '<div class="product-detail-price">' + fmtRp(p.price) + '</div>' + special +
+    '<p class="muted">Stok: ' + esc(stock) + (p.category ? ' · Kategori: ' + esc(p.category) : '') + '</p>' +
+    '<div class="detail-qty-row"><button type="button" onclick="detailChangeQty(-1)" aria-label="Kurangi jumlah">−</button><b id="detailQtyVal">' + detailQty + '</b>' +
+    '<button type="button" onclick="detailChangeQty(1)" aria-label="Tambah jumlah">+</button></div>' +
+    '<button type="button" class="btn btn-block" onclick="detailAddToCart()">Tambah ke keranjang</button>');
+}
+function detailChangeQty(delta) {
+  var p = findProduct(detailProductId); if (!p) return;
+  var next = detailQty + delta;
+  if (next < 1) next = 1;
+  if (next > Number(p.stock || 0)) { toast('Stok ' + p.name + ' hanya tersisa ' + p.stock + '.', false); return; }
+  detailQty = next;
+  var el = $('detailQtyVal'); if (el) el.textContent = detailQty;
+}
+function detailAddToCart() {
+  var p = findProduct(detailProductId); if (!p) return;
+  var item = cart.find(function (c) { return String(c.productId) === String(p.id); });
+  if (detailQty > Number(p.stock || 0)) { toast('Stok ' + p.name + ' hanya tersisa ' + p.stock + '.', false); return; }
+  if (item) item.qty = detailQty; else cart.push({ productId: p.id, qty: detailQty });
+  saveLocal(); closeModal();
+  toast(p.name + ' × ' + detailQty + ' masuk keranjang.');
+  render();
 }
 
 function cartLines(payment) {
@@ -272,6 +404,7 @@ async function renderWargaOrders(view) {
   var orders = [];
   try { orders = await api('/warga/' + warga.id + '/orders'); } catch (e) { toast('Gagal memuat pesanan: ' + e.message, false); }
   if (!Array.isArray(orders)) orders = [];
+  lastLive.orders = JSON.stringify(orders);
   var html = '<h1>Pesanan Saya</h1>';
   if (!orders.length) html += '<div class="card"><p>Belum ada pesanan.</p></div>';
   orders.forEach(function (o) {
@@ -279,11 +412,11 @@ async function renderWargaOrders(view) {
     // tampilkan label kapital (sebelumnya tombol Batalkan tidak pernah muncul).
     var rawStatus = orderStatusRaw(o.status);
     var status = orderStatusLabel(rawStatus);
-    // PERBAIKAN: items dari API berupa JSON string (kolom TEXT SQLite).
-    var itemsTxt = parseItems(o.items).map(function (it) { var p = findProduct(it.productId); return (p ? p.name : 'Barang #' + it.productId) + ' × ' + it.qty; }).join(', ');
+    // FITUR: Gambar barang di pesanan — dari snapshot di data pesanan
+    // (orderItemsHtml), tetap tampil walau barang diubah/dihapus admin.
     html += '<div class="card"><div class="row-between"><b>Pesanan #' + esc(o.id) + '</b><span class="status-pill status-' + esc(status) + '">' + esc(status) + '</span></div>' +
       '<p class="muted">' + fmtDate(o.createdAt || o.date) + ' · ' + esc(o.method === 'antar' ? 'Diantar' : 'Ambil di toko') + ' · ' + esc(o.slot || '') + ' · ' + esc(o.payment === 'saldo' ? 'Saldo' : 'Tunai') + '</p>' +
-      '<p>' + esc(itemsTxt) + '</p><p><b>Total: ' + fmtRp(o.total) + '</b></p>' +
+      orderItemsHtml(o.items) + '<p><b>Total: ' + fmtRp(o.total) + '</b></p>' +
       (rawStatus === 'baru' ? '<button type="button" class="btn btn-danger btn-small" onclick="cancelOrder(' + o.id + ')">Batalkan pesanan</button>' : '') +
       (rawStatus === 'diproses' ? '<p class="muted">Pesanan sedang diproses, tidak bisa dibatalkan.</p>' : '') + '</div>';
   });
@@ -303,8 +436,11 @@ async function renderSaldo(view) {
   var balance = 0, hasPending = false;
   try { var b = await api('/warga/' + warga.id + '/balance'); balance = (b && b.balance) || 0; } catch (e) {}
   try { var s = await api('/warga/' + warga.id + '/topup-status'); hasPending = !!(s && s.hasPending); } catch (e) {}
-  var html = '<h1>Saldo Saya</h1><div class="card"><div class="muted">Saldo tokoku</div><h1 style="font-size:28px">' + fmtRp(balance) + '</h1></div>' +
-    '<div class="warn-box">Saldo tokoku tidak dapat diuangkan kembali.</div>' +
+  lastLive.balance = balance; lastLive.topupPending = hasPending;
+  var html = '<h1>Saldo Saya</h1><div class="card"><div class="muted">Saldo tokoku</div><h1 id="saldoValue" style="font-size:28px">' + fmtRp(balance) + '</h1></div>' +
+    // FITUR: Peringatan saldo — teks PERSIS seperti yang diminta, di bawah
+    // angka saldo dan di atas formulir top-up, sebagai kotak peringatan.
+    '<div class="warn-box">Saldo tokoku tidak dapat di uangkan kembali. Saldo hanya bisa di pakai untuk belanja di tokoku, jadi isi secukupnya sesuai kebutuhan belanja Kamu</div>' +
     '<div class="card"><h2>Bayar top-up dengan QRIS</h2>' +
     '<img src="qris.jpg" alt="QRIS Toko Khayla" class="qris-img" onerror="this.style.display=\'none\'">' +
     '<p><b>QRIS Toko Khayla</b><br>NMID: ID1022215364889 · A01<br><span class="muted">Scan pakai aplikasi bank / e-wallet.</span></p></div>';
@@ -336,27 +472,16 @@ async function renderWargaChat(view) {
   try { data = await api('/chat/' + warga.id); } catch (e) { toast('Gagal memuat chat: ' + e.message, false); }
   var msgs = data.messages || [];
   lastChatKey = msgs.map(function (m) { return m.id; }).join(',');
-  view.innerHTML = '<h1>Chat Toko</h1><div class="card"><div class="chat-box">' +
-    (msgs.length ? msgs.map(function (m) {
-      var mine = m.sender === 'warga';
-      return '<div class="bubble' + (mine ? ' mine' : '') + '">' + (m.text ? esc(m.text) : '') + (m.image ? '<img src="' + esc(m.image) + '" alt="Gambar chat">' : '') +
-        '<div class="muted" style="font-size:11px">' + fmtDate(m.createdAt) + '</div></div>';
-    }).join('') : '<p class="muted">Belum ada pesan. Sapa toko di bawah.</p>') + '</div>' +
+  view.innerHTML = '<h1>Chat Toko</h1><div class="card"><div class="chat-box" id="chatBox">' +
+    (msgs.length ? chatBubblesHtml(msgs, 'warga') : '<p class="muted">Belum ada pesan. Sapa toko di bawah.</p>') + '</div>' +
     '<div id="chatPreview" class="img-preview"></div>' +
     '<div class="chat-input-row"><label class="btn btn-secondary btn-small" style="padding:9px 12px">📎<input type="file" accept="image/*" hidden onchange="onChatImageChange(this)"></label>' +
     '<input type="text" id="chatText" placeholder="Tulis pesan..." onkeydown="if(event.key===\'Enter\')sendWargaChat()">' +
     '<button type="button" class="btn" onclick="sendWargaChat()">Kirim</button></div></div>';
   try { await api('/chat/' + warga.id + '/read', { method: 'POST', body: { by: 'warga' } }); unreadWarga = 0; renderNav(); } catch (e) {}
-  stopChatPoll();
-  // Perbarui hanya bila ada pesan baru — supaya teks yang sedang diketik tidak hilang tiap 10 detik
-  chatPoll = setInterval(async function () {
-    if (wargaTab !== 'chat') return;
-    try {
-      var d = await api('/chat/' + warga.id);
-      var key = (d.messages || []).map(function (m) { return m.id; }).join(',');
-      if (key !== lastChatKey) { var v = $('view'); if (v) await renderWargaChat(v); }
-    } catch (e) {}
-  }, 10000);
+  // FITUR: Live update tanpa refresh — polling chat ditangani polling global
+  // 10 detik (pollLive): hanya kotak pesan yang diganti bila ada pesan baru,
+  // input ketik tidak disentuh.
 }
 async function sendWargaChat() { await sendChat('warga', warga.id); }
 
@@ -367,5 +492,7 @@ function renderAccount(view) {
 }
 
 // ---------- Start ----------
+// FITUR: Live update tanpa refresh — polling global tiap 10 detik.
 document.addEventListener('DOMContentLoaded', render);
 render();
+startLivePoll();

@@ -33,6 +33,66 @@ function parseItems(o) {
   return [];
 }
 
+// FITUR: Layar loading awal — sembunyikan splash hijau setelah render
+// pertama selesai (dipanggil sekali; pengaman 15 detik ada di HTML).
+var splashHidden = false;
+function hideSplash() {
+  if (splashHidden) return;
+  splashHidden = true;
+  var s = $('splash');
+  if (s) s.hidden = true;
+}
+
+// FITUR: Live update tanpa refresh — jalankan ulang fn sambil menjaga
+// posisi scroll halaman (dipakai saat polling menemukan data berubah).
+function preserveScroll(fn) {
+  var y = window.scrollY || 0;
+  var r = fn();
+  if (r && typeof r.then === 'function') {
+    return r.then(function (v) { window.scrollTo(0, y); return v; });
+  }
+  window.scrollTo(0, y);
+  return r;
+}
+
+// FITUR: Live update tanpa refresh — lewati pembaruan tampilan bila pengguna
+// sedang mengetik di formulir pada layar yang sedang dibuka (supaya isian
+// tidak hilang saat polling).
+function viewHasFormFocus() {
+  var a = document.activeElement;
+  if (!a) return false;
+  var tag = (a.tagName || '').toLowerCase();
+  if (tag !== 'input' && tag !== 'select' && tag !== 'textarea') return false;
+  var view = $('view');
+  return !!(view && view.contains(a));
+}
+
+// FITUR: Gelembung chat — dipakai warga & admin; pembaruan polling hanya
+// mengganti isi kotak chat ini, input ketik tidak disentuh.
+function chatBubblesHtml(msgs, mySender) {
+  return (msgs || []).map(function (m) {
+    var mine = m.sender === mySender;
+    return '<div class="bubble' + (mine ? ' mine' : '') + '">' + (m.text ? esc(m.text) : '') + (m.image ? '<img src="' + esc(m.image) + '" alt="Gambar chat">' : '') +
+      '<div class="muted" style="font-size:11px">' + fmtDate(m.createdAt) + '</div></div>';
+  }).join('');
+}
+
+// FITUR: Baris barang pesanan — foto diambil dari SNAPSHOT di data pesanan
+// (it.image, disimpan server saat pesanan dibuat), bukan dari katalog saat
+// ini; jadi gambar tetap tampil walau barang diubah/dihapus admin.
+// Pesanan lama tanpa snapshot tampil tanpa gambar.
+function orderItemsHtml(items) {
+  var list = parseItems(items);
+  if (!list.length) return '';
+  return '<div class="order-items">' + list.map(function (it) {
+    var p = findProduct(it.productId);
+    var name = it.name || (p ? p.name : 'Barang #' + it.productId);
+    var img = it.image ? '<img src="' + esc(it.image) + '" alt="' + esc(name) + '" onerror="this.style.display=\'none\'">' : '';
+    return '<div class="order-item">' + img + '<div class="order-item-info"><b>' + esc(name) + '</b><br><span class="muted">' + fmtRp(it.price) + ' × ' + it.qty + '</span></div>' +
+      '<span class="order-item-price">' + fmtRp((Number(it.price) || 0) * (Number(it.qty) || 0)) + '</span></div>';
+  }).join('') + '</div>';
+}
+
 // FITUR: pesan hasil (toast) untuk semua aksi penting
 var toastTimer = null;
 function toast(msg, ok) {
