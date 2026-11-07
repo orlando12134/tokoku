@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>tokoku — Toko Klontong Perum GKR</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="app-header">
+  <img src="logo.png" alt="Logo tokoku" class="logo" onerror="this.style.display='none'">
+  <p class="header-tagline">Warga Perum GKR saja</p>
+  <p id="storeStatus" class="store-status"></p>
+</header>
+
+<main id="view" class="view"></main>
+
+<!-- Bilah keranjang melayang (hanya di tab Belanja, diisi warga.js) -->
+<div id="cartBar" class="cart-bar" hidden></div>
+
+<nav id="bottomNav" class="bottom-nav" aria-label="Navigasi utama"></nav>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- Modal umum: dipakai untuk info (mis. alasan penolakan). Klik di luar
+     kotak atau tombol Tutup untuk menutup. -->
+<div id="modal" class="modal-overlay" hidden onclick="if(event.target===this)closeModal()">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div id="modalBody"></div>
+    <button type="button" class="btn btn-secondary modal-close" onclick="closeModal()">Tutup</button>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script src="warga.js"></script>
+</body>
+</html>
