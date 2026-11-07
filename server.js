@@ -229,7 +229,10 @@ const MIME = {
 
 function serveStatic(req, res, urlPath) {
   let rel = decodeURIComponent(urlPath);
-  if (rel === '/' || rel === '') rel = '/index.html';
+  // FITUR: Aplikasi terpisah — "/" = aplikasi Warga, "/admin" = aplikasi Admin.
+  // Satu server + satu database; data (pesanan, saldo, chat) tetap bersama.
+  if (rel === '/' || rel === '') rel = '/warga.html';
+  if (rel === '/admin' || rel === '/admin/') rel = '/admin.html';
   const filePath = path.normalize(path.join(PUBLIC_DIR, rel));
   // Cegah path traversal keluar dari public/
   if (!filePath.startsWith(PUBLIC_DIR)) {

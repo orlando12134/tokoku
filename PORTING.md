@@ -10,11 +10,17 @@ folder ini. Tujuannya: pembaruan berikutnya tidak dibangun ulang dari nol.
 - **Satu server, tanpa dependensi eksternal.** `server.js` hanya memakai
   modul bawaan Node (`http`, `node:sqlite`). Tidak ada `npm install` yang
   bisa gagal saat deploy; update Node tetap jalan.
-- **Satu halaman frontend.** `public/index.html` (struktur), `public/style.css`
-  (tampilan), `public/app.js` (logika). Tidak ada framework/build step.
-- **Penanda fitur.** Setiap blok fitur di `server.js` dan `public/app.js`
-  diawali komentar `// FITUR: <nama fitur>`. Saat memindahkan perubahan,
-  cari penanda yang sama di kedua versi dan ubah blok itu saja.
+- **Dua aplikasi terpisah, satu server + satu database (sejak 2026-11-07).**
+  `public/warga.html` + `public/warga.js` (aplikasi Warga, rute `/`),
+  `public/admin.html` + `public/admin.js` (aplikasi Admin, rute `/admin`),
+  `public/common.js` (kode bersama: API, toast, modal, muat settings/produk,
+  kirim chat). Tidak ada framework/build step, tidak ada mode-switch.
+  Perubahan tampilan/teks warga ubah di `warga.*`; admin di `admin.*`;
+  yang dipakai keduanya di `common.js` / `style.css`.
+- **Penanda fitur.** Setiap blok fitur di `server.js` dan `public/common.js`,
+  `public/warga.js`, `public/admin.js` diawali komentar `// FITUR: ...`.
+  Saat memindahkan perubahan, cari penanda yang sama di file-file itu dan
+  ubah blok itu saja.
 - **Kontrak API tetap.** Frontend hanya memanggil endpoint `/api/...` yang
   didokumentasikan di `README.md`. Perubahan perilaku server harus menjaga
   bentuk respons yang sama, atau ubah frontend di tempat yang sama.
@@ -30,12 +36,14 @@ folder ini. Tujuannya: pembaruan berikutnya tidak dibangun ulang dari nol.
    (mis. ongkir Rp2.000, saklar mati).
 2. **Cari penanda fitur di versi publik.** Buka `FITUR.md`, temukan baris
    fitur yang bersangkutan, lalu cari komentar `// FITUR: ...` yang sama
-   di `server.js` dan/atau `public/app.js`.
+   di `server.js` dan/atau `public/common.js`, `public/warga.js`,
+   `public/admin.js`.
 3. **Ubah di tempat yang sama.**
    - Perubahan aturan/data (harga, ongkir, status pesanan, validasi):
      ubah di `server.js` dulu — server yang menegakkan aturan.
-   - Perubahan tampilan/teks: ubah di `public/index.html` / `public/style.css`.
-   - Perubahan alur di layar (tombol, form, navigasi): ubah di `public/app.js`.
+   - Perubahan tampilan/teks: ubah di `public/warga.html` / `public/admin.html` / `public/style.css`.
+   - Perubahan alur di layar (tombol, form, navigasi): ubah di `public/warga.js` (warga),
+     `public/admin.js` (admin), atau `public/common.js` (dipakai keduanya).
    - Perubahan struktur data: tambah kolom/tabel di fungsi init database
      `server.js` dengan migrasi "tambah bila belum ada" (jangan hapus
      tabel — data warga yang sudah ada harus selamat).
@@ -53,11 +61,13 @@ folder ini. Tujuannya: pembaruan berikutnya tidak dibangun ulang dari nol.
 | Perubahan | File yang diubah |
 |---|---|
 | Aturan harga/ongkir/status/validasi | `server.js` (blok `// FITUR: ...`) |
-| Teks, label, placeholder, warna, ukuran font | `public/index.html`, `public/style.css` |
-| Alur layar, tombol, form, navigasi | `public/app.js` (blok `// FITUR: ...`) |
+| Teks, label, placeholder, warna, ukuran font | `public/warga.html`, `public/admin.html`, `public/style.css` |
+| Alur layar, tombol, form, navigasi (warga) | `public/warga.js` (blok `// FITUR: ...`) |
+| Alur layar, tombol, form, navigasi (admin) | `public/admin.js` (blok `// FITUR: ...`) |
+| Alur layar, tombol, form, navigasi (bersama) | `public/common.js` (blok `// FITUR: ...`) |
 | Kolom/tabel baru | `server.js` (init database + migrasi) |
-| Endpoint baru | `server.js` + pemanggilnya di `public/app.js` |
-| Aset baru (logo, QRIS, foto) | `public/` + referensi di `public/index.html` |
+| Endpoint baru | `server.js` + pemanggilnya di `public/common.js` / `public/warga.js` / `public/admin.js` |
+| Aset baru (logo, QRIS, foto) | `public/` + referensi di `public/warga.html` / `public/admin.html` |
 
 ## Yang belum ada (ide untuk pembaruan berikutnya)
 
