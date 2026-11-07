@@ -7,9 +7,10 @@ folder ini. Tujuannya: pembaruan berikutnya tidak dibangun ulang dari nol.
 
 ## Prinsip susunan kode (supaya porting mudah)
 
-- **Satu server, tanpa dependensi eksternal.** `server.js` hanya memakai
-  modul bawaan Node (`http`, `node:sqlite`). Tidak ada `npm install` yang
-  bisa gagal saat deploy; update Node tetap jalan.
+- **Satu server, satu dependensi.** `server.js` memakai modul bawaan Node
+  (`http`) + `@libsql/client` untuk database. `npm install` di Render
+  memasang dependensi itu dari `package-lock.json`; update Node tetap jalan.
+  Jangan tambah dependensi tanpa alasan kuat.
 - **Dua aplikasi terpisah, satu server + satu database (sejak 2026-11-07).**
   `public/warga.html` + `public/warga.js` (aplikasi Warga, rute `/`),
   `public/admin.html` + `public/admin.js` (aplikasi Admin, rute `/admin`),
@@ -69,7 +70,11 @@ folder ini. Tujuannya: pembaruan berikutnya tidak dibangun ulang dari nol.
 | Live update tanpa refresh (polling 10 detik, hanya bila berubah) | `public/warga.js` / `public/admin.js` (`startLivePoll()` / `pollLive()` + snapshot `lastLive`), `public/common.js` (`preserveScroll()`, `viewHasFormFocus()`, `chatBubblesHtml()`) |
 | Snapshot gambar di data pesanan | `server.js` (tambah `image` di tiap item saat `POST /api/orders`), `public/common.js` (`orderItemsHtml()`), `public/warga.js` / `public/admin.js` (pakai `orderItemsHtml()` di kartu pesanan) |
 | Detail produk (klik gambar) | `public/warga.js` (`openProductDetail()` / `renderProductDetail()` / `detailAddToCart()`), `public/style.css` (`.product-detail-*`, `.detail-qty-row`) |
+| Status toko buka/tutup live tanpa refresh | `public/warga.js` / `public/admin.js` (`pollLive()` mem-poll `/api/settings` di semua tab + perbarui header/etalase/saklar), `public/common.js` (`isStoreOpen()`) |
+| Foto profil warga | `server.js` (kolom `photo` + migrasi aman + `POST /api/register` + `PUT /api/warga/:id/profile` + foto di `/api/admin/warga`, `/api/admin/warga/:id/history`, `/api/chat/threads`), `public/warga.js` (upload saat daftar + Akun), `public/admin.js` (daftar/riwayat/chat), `public/common.js` (`avatarHtml()`), `public/style.css` (`.avatar`) |
+| Modal konfirmasi pengganti `confirm()` bawaan | `public/common.js` (`openConfirmModal()` / `submitConfirm()`, `openModal(html, opts)`), `public/warga.js` (`cancelOrder()`), `public/style.css` (`.modal-confirm`) |
 | Kolom/tabel baru | `server.js` (init database + migrasi) |
+| Database Turso vs file lokal | `server.js` (client `@libsql/client`: env `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` → Turso; bila tidak ada → file lokal `DB_PATH`/`data/tokoku.db`); `package.json` (dependensi) |
 | Endpoint baru | `server.js` + pemanggilnya di `public/common.js` / `public/warga.js` / `public/admin.js` |
 | Aset baru (logo, QRIS, foto) | `public/` + referensi di `public/warga.html` / `public/admin.html` |
 
@@ -91,6 +96,34 @@ folder ini. Tujuannya: pembaruan berikutnya tidak dibangun ulang dari nol.
   langsung di HTML sebelum `<script>` agar tampil sebelum JS jalan;
   disembunyikan di akhir `render()` pertama (`hideSplash()`), dengan
   pengaman `setTimeout` 15 detik di HTML bila JS gagal.
+
+## Backup database live — sekarang berkala, bukan wajib sebelum deploy
+
+**Latar:** sebelum migrasi Turso (2026-11-08), Render Free memakai
+filesystem ephemeral — setiap deploy/restart menghapus `data/tokoku.db`.
+Pada 2026-11-07 malam, barang dan warga yang sudah dimasukkan Andrik
+hilang setelah deploy karena tidak ada backup.
+
+**Sejak migrasi Turso, data live TIDAK lagi hilang saat deploy.**
+Database tinggal di Turso (libSQL, database "tokoku", Singapore), di luar
+filesystem Render — deploy/restart tidak menyentuhnya. Jadi langkah
+backup sebelum deploy **tidak lagi wajib**.
+
+Yang tetap disarankan: **backup berkala** (mis. seminggu sekali) lewat
+dashboard Turso — ekspor/salin database dan simpan salinannya di tempat
+aman di luar Turso. Bila suatu hari perlu pindah layanan database lagi,
+salinan itu yang dipakai.
+
+Catatan keamanan: JANGAN menambahkan endpoint unduh database tanpa
+pengaman — Admin saat ini tanpa kata sandi, jadi endpoint seperti itu
+akan membuka seluruh data warga ke publik. Token Turso (`TURSO_AUTH_TOKEN`
+di Render) juga jangan dibagikan ke siapa pun — pemegangnya bisa membaca
+dan mengubah seluruh data toko.
+
+**Bila data hilang setelah deploy (tidak seharusnya terjadi lagi):**
+jangan isi ulang manual dulu — cek dulu dashboard Turso (apakah database
+masih ada dan berisi data) dan log deploy Render; bila database Turso
+masih utuh, masalahnya di koneksi (env var), bukan di data.
 
 ## Yang belum ada (ide untuk pembaruan berikutnya)
 

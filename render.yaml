@@ -1,10 +1,11 @@
 # Blueprint Render untuk tokoku (dipakai bila deploy lewat Render).
 # Cara pakai: hubungkan repo GitHub ini di dashboard Render → New → Web Service
 # (atau New → Blueprint bila render.yaml terdeteksi otomatis).
-# PENTING: paket free Render memakai filesystem ephemeral — database SQLite
-# akan hilang setiap deploy/restart. Supaya data bertahan, perlu paket
-# Starter (berbayar) + persistent disk, atau pakai PostgreSQL terkelola.
-# Lihat README.md bagian "Deploy" untuk penjelasan lengkap.
+# PENTING (sejak 2026-11-08): data live tinggal di Turso (libSQL, gratis),
+# BUKAN di file SQLite Render — deploy/restart tidak lagi menghapus data.
+# Set env TURSO_DATABASE_URL + TURSO_AUTH_TOKEN di dashboard Render
+# (sudah tersimpan di service live). DB_PATH di bawah hanya fallback lokal
+# bila env Turso tidak ada. Lihat README.md bagian "Deploy".
 services:
   - type: web
     name: tokoku

@@ -11,7 +11,8 @@ asli sendiri.
 
 | Bagian | File |
 |---|---|
-| Server + API + database SQLite | `server.js` |
+| Server + API + database Turso (libSQL) / file lokal | `server.js` |
+| Satu-satunya dependensi: `@libsql/client` | `package.json` (+ `package-lock.json`) |
 | Aplikasi Warga — `/` (warga) | `public/warga.html` + `public/warga.js` |
 | Aplikasi Admin — `/admin` (admin) | `public/admin.html` + `public/admin.js` |
 | Kode bersama (API, toast, modal, chat) | `public/common.js` |
@@ -19,12 +20,76 @@ asli sendiri.
 | Pengalihan `/index.html` → `/` | `public/index.html` |
 | Logo toko | `public/logo.png` |
 | Gambar QRIS | `public/qris.jpg` |
-| Database (dibuat saat server pertama jalan) | `data/tokoku.db` |
+| Database file lokal — HANYA fallback dev/uji lokal | `data/tokoku.db` |
 
 Rute server: `/` menyajikan aplikasi Warga, `/admin` menyajikan aplikasi
 Admin. Tidak ada tombol ganti mode — warga hanya bisa membuka aplikasi
 Warga, admin membuka aplikasi Admin lewat `/admin`. Data tetap satu:
 pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
+
+## Migrasi database ke Turso 2026-11-08 (data tidak hilang lagi saat deploy)
+
+- **Latar:** database live sebelumnya di file SQLite di Render (filesystem
+  ephemeral) — hilang tiap deploy/restart. Pada 2026-11-07 malam barang
+  dan warga yang sudah dimasukkan hilang setelah deploy. Andrik memilih
+  pindah ke database gratis (bukan paket berbayar).
+- **Sekarang:** data live tinggal di **Turso (libSQL, gratis)** — database
+  "tokoku", Singapore, akun orlando12134. Deploy/restart Render **tidak
+  lagi menghapus data**.
+- **Cara kerja:** `server.js` memakai satu driver `@libsql/client` untuk
+  keduanya. Bila env `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` tersedia
+  (sudah tersimpan di Render) → client Turso jarak jauh; bila tidak →
+  fallback ke file lokal `data/tokoku.db` (atau env `DB_PATH`) untuk
+  pengembangan/uji lokal. Semua query ditulis async/await; transaksi
+  (buat/batalkan pesanan, setujui top-up) memakai
+  `client.transaction('write')` supaya tetap atomik.
+- **Skema & API tidak berubah:** tabel dan kolom sama persis (products,
+  warga + kolom `photo`, topups, orders, messages, settings); format
+  respons, kode status, dan pesan error API identik. Satu-satunya
+  perubahan perilaku yang disengaja: `GET /api/chat/threads` kini memakai
+  3 query gabungan (bukan N+1 per warga) supaya polling tetap cepat
+  lewat Turso jarak jauh; bentuk responsnya sama persis.
+- **Yang belum bisa diuji lokal:** round-trip jaringan ke Turso
+  (token tidak tersedia di lingkungan uji) — diverifikasi setelah deploy
+  live dengan uji ketahanan data (isi barang → deploy ulang → barang
+  tetap ada).
+
+## Perbaikan 2026-11-08 (3 perbaikan: status toko live, foto profil, modal konfirmasi)
+
+- **Status toko buka/tutup live tanpa refresh:** `pollLive()` di
+  `warga.js` dan `admin.js` kini mem-poll `/api/settings` di SEMUA tab
+  (sebelumnya Warga hanya di tab Belanja, Admin hanya tersirat di kunci
+  Beranda — dan kunci itu memakai `settings` basi dari `render()`, jadi
+  perubahan dari admin lain tidak terdeteksi). Bila `storeOpen` berubah:
+  teks header "Toko Buka/Tutup" diperbarui langsung, etalase Warga
+  disembunyikan/ditampilkan dan bilah keranjang diperbarui tanpa refresh
+  (tab Keranjang ikut dibangun ulang; tab lain cukup headernya). Di
+  Admin, saklar di Beranda ikut berubah setelah polling. Posisi scroll
+  dijaga (`preserveScroll()`); formulir yang sedang diisi tidak dibangun
+  ulang (`viewHasFormFocus()`).
+- **Foto profil warga:** warga bisa pasang foto saat daftar (pratinjau)
+  dan di menu Akun (ganti/hapus foto). Foto disimpan sebagai snapshot
+  data URL, sama seperti foto barang/chat. Kolom baru `photo` di tabel
+  `warga` (`server.js`): ada di `CREATE TABLE` untuk DB baru, dan
+  ditambah ke DB lama lewat migrasi aman `ALTER TABLE ... ADD COLUMN
+  photo TEXT NULL` bila belum ada — warga lama tetap terbaca
+  (`photo = null`). Endpoint baru `PUT /api/warga/:id/profile`
+  (foto/nama/blok/nomor rumah; `photo: null` menghapus foto).
+  `GET /api/admin/warga`, `GET /api/admin/warga/:id/history`, dan
+  `GET /api/chat/threads` mengembalikan foto. Foto tampil di Admin:
+  daftar warga (termasuk yang menunggu verifikasi), riwayat warga, dan
+  daftar chat. Bila warga belum pasang foto, tampil lingkaran berisi
+  inisial nama (`avatarHtml()` di `common.js`, gaya `.avatar` di
+  `style.css`).
+- **Konfirmasi batalkan pesanan tanpa dialog bawaan browser:** tidak ada
+  lagi `window.confirm` di kode (satu-satunya pemakaian, di
+  `cancelOrder()` `warga.js`, sudah diganti — dicek lewat `grep`).
+  Penggantinya `openConfirmModal()` di `common.js`: modal umum yang
+  sudah ada, overlay hijau lembut terang (`.modal-confirm`, bukan layar
+  gelap), kartu putih, tombol "Ya, batalkan pesanan" (merah) dan "Tidak
+  jadi"; tombol Tutup bawaan disembunyikan selama modal konfirmasi
+  tampil. Perilaku batal tidak berubah: stok dan saldo (bila bayar pakai
+  saldo) dikembalikan.
 
 ## Perbaikan 2026-11-07 (malam — 5 perbaikan dari versi Muse)
 
@@ -100,6 +165,7 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 
 ### Warga — akun
 - [x] Daftar: nama, nomor HP, blok (contoh "mawar"), nomor rumah (contoh "AA01").
+- [x] Foto profil: pasang foto saat daftar dan di menu Akun (ganti/hapus); foto tampil di Admin (daftar warga, verifikasi, riwayat, chat); bila belum ada foto tampil inisial nama.
 - [x] Verifikasi admin sebelum bisa belanja; penolakan menampilkan alasan admin.
 - [x] 1 nomor HP = 1 akun (nomor yang sudah terdaftar menampilkan "Masuk sebagai ...", tidak membuat akun kedua).
 - [x] Log in pakai nomor HP; log out di tab Akun.
@@ -121,7 +187,7 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 - [x] Bayar pakai saldo (memakai harga spesial bila ada) atau tunai (catatan "Mohon bayar dengan uang pas" di menu bayar dan kartu pesanan).
 - [x] Catatan untuk toko, contoh "cth. Tolong di taruh di kranjang paket".
 - [x] Saklar on/off "Gratis ongkir bila bayar pakai saldo" di pengaturan admin (bawaan mati); keranjang menampilkan "GRATIS (bayar pakai saldo)" bila aktif.
-- [x] Warga bisa membatalkan pesanan Baru (stok dan saldo dikembalikan); tidak bisa membatalkan bila sudah Diproses (server juga menolak).
+- [x] Warga bisa membatalkan pesanan Baru (stok dan saldo dikembalikan); tidak bisa membatalkan bila sudah Diproses (server juga menolak). Konfirmasi batal memakai modal buatan sendiri ("Ya, batalkan pesanan" / "Tidak jadi"), bukan dialog bawaan browser — tidak ada lagi `window.confirm` di kode.
 - [x] Admin memproses Baru → Diproses → Selesai; cari pesanan berdasarkan tanggal dan jam; cetak struk per pesanan.
 - [x] Admin melihat riwayat transaksi tiap warga terverifikasi (pesanan, top-up, total belanja).
 
@@ -132,10 +198,12 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 
 ### Toko buka/tutup
 - [x] Saklar di Beranda Admin (bawaan buka); saat tutup, warga tidak bisa melihat etalase dan tidak bisa memesan (server menolak pesanan baru).
+- [x] Status buka/tutup berubah live tanpa refresh di Warga dan Admin (polling `/api/settings` di semua tab; header, etalase, dan saklar Beranda ikut berubah).
 
 ### Loading awal & live update
 - [x] Layar loading hijau (#166534) + logo + "Memuat…" + titik berputar tampil sebelum JS jalan di Warga dan Admin, hilang setelah render pertama (bukan layar hitam).
-- [x] Live update tanpa refresh (polling 10 detik, hanya bila data berubah, scroll dijaga): pesanan/top-up/verifikasi/chat di Admin; status pesanan, status top-up, saldo, dan chat di Warga.
+- [x] Live update tanpa refresh (polling 10 detik, hanya bila data berubah, scroll dijaga): pesanan/top-up/verifikasi/chat di Admin; status pesanan, status top-up, saldo, dan chat di Warga; status buka/tutup toko di kedua aplikasi.
+- [x] Modal konfirmasi buatan sendiri (`openConfirmModal()` di `common.js`, overlay hijau lembut) menggantikan semua `confirm()` bawaan browser.
 - [x] Klik gambar/nama produk di katalog Belanja membuka detail produk (foto besar, harga normal + harga spesial saldo, stok, kategori) dengan pilihan jumlah dan tombol "Tambah ke keranjang"; tombol +/- cepat di kartu tetap berfungsi.
 
 ## Batasan yang diketahui
@@ -144,4 +212,6 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
   tanpa kata sandi di versi gabungan sebelumnya). Untuk pemakaian serius
   jangka panjang, tambahkan PIN/kata sandi admin (lihat PORTING.md,
   "Yang belum ada").
-- Server ini satu proses dengan SQLite lokal; cocok untuk skala komplek (10–20 warga).
+- Server ini satu proses; data live di Turso (libSQL, gratis) sehingga
+  bertahan tiap deploy/restart — cocok untuk skala komplek (10–20 warga).
+  File `data/tokoku.db` hanya fallback lokal.

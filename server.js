@@ -1,19 +1,24 @@
 // ============================================================================
 // TOKOKU — Backend publik (di luar Muse)
 // Toko klontong "tokoku", khusus warga Perum GKR.
-// Node.js TANPA dependensi eksternal: modul bawaan http + node:sqlite saja.
+// Satu server Node.js melayani frontend dan API.
+// Database: Turso (libSQL, jarak jauh) bila env TURSO_DATABASE_URL +
+// TURSO_AUTH_TOKEN tersedia; bila tidak, fallback ke file SQLite lokal
+// (./data/tokoku.db) lewat driver libsql yang sama — satu jalur kode saja.
 // Jalankan:  node server.js   (port dari env PORT, default 3000)
-// Database:  ./data/tokoku.db  (dibuat otomatis saat start)
 // File statis: ./public/  (frontend)
 // ----------------------------------------------------------------------------
 // CATATAN PORTING: pembaruan dari versi Muse di-porting ke file ini.
 // Setiap blok fitur ditandai komentar "// FITUR: ..." agar mudah dicari.
+// CATATAN DATA (2026-11-08): database TIDAK BOLEH lagi di file lokal Render
+// (filesystem ephemeral — hilang tiap deploy). Karena itu data live tinggal
+// di Turso; file lokal hanya fallback untuk pengembangan/uji lokal.
 // ============================================================================
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
+const { createClient } = require('@libsql/client');
 
 const PORT = Number(process.env.PORT) || 3000;
 const BASE_DIR = __dirname;
@@ -25,12 +30,64 @@ const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, 'tokoku.db');
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 // ============================================================================
-// FITUR: Database SQLite — buat folder + tabel saat start
+// FITUR: Database — Turso (libSQL jarak jauh) atau file lokal (fallback)
+// Satu driver (@libsql/client) untuk keduanya, jadi perilaku query sama.
+// - Turso:  env TURSO_DATABASE_URL (libsql://...) + TURSO_AUTH_TOKEN.
+// - Lokal:  file ./data/tokoku.db (atau env DB_PATH), untuk dev/uji lokal.
 // ============================================================================
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const db = new DatabaseSync(DB_PATH);
+const TURSO_URL = process.env.TURSO_DATABASE_URL || '';
+const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN || '';
+const USE_TURSO = Boolean(TURSO_URL);
 
-db.exec(`
+let client;
+if (USE_TURSO) {
+  client = createClient({ url: TURSO_URL, authToken: TURSO_TOKEN || undefined });
+  console.log('Database: Turso (remote)');
+} else {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  client = createClient({ url: 'file:' + DB_PATH });
+  console.log('Database: file lokal ' + DB_PATH);
+}
+
+// FITUR: Helper query — libsql mengembalikan { rows, lastInsertRowid, ... }.
+// lastInsertRowid berupa BigInt → selalu ubah ke Number sebelum dipakai
+// (argumen query / respons JSON tidak boleh mengandung BigInt).
+async function q(sql, args = [], ex = null) {
+  const r = await (ex || client).execute(sql, args);
+  return r.rows;
+}
+
+async function qOne(sql, args = [], ex = null) {
+  const rows = await q(sql, args, ex);
+  return rows[0] || null;
+}
+
+async function run(sql, args = [], ex = null) {
+  return (ex || client).execute(sql, args);
+}
+
+function numId(v) {
+  return typeof v === 'bigint' ? Number(v) : v;
+}
+
+// FITUR: Transaksi atomik via libsql (client.transaction('write')).
+// Callback menerima executor tx; semua query di dalamnya memakai tx.
+async function withTransaction(fn) {
+  const tx = await client.transaction('write');
+  try {
+    const result = await fn(tx);
+    await tx.commit();
+    return result;
+  } catch (err) {
+    try { await tx.rollback(); } catch { /* sudah rollback */ }
+    throw err;
+  } finally {
+    tx.close();
+  }
+}
+
+// FITUR: Skema tabel — dibuat saat start (CREATE TABLE IF NOT EXISTS)
+const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -56,6 +113,7 @@ db.exec(`
     status TEXT NOT NULL DEFAULT 'pending',
     rejectReason TEXT NULL,
     balance INTEGER NOT NULL DEFAULT 0,
+    photo TEXT NULL,
     createdAt TEXT NOT NULL
   );
 
@@ -95,15 +153,35 @@ db.exec(`
     readByAdmin INTEGER NOT NULL DEFAULT 0,
     readByWarga INTEGER NOT NULL DEFAULT 0
   );
-`);
+`;
 
-// FITUR: Settings default — ongkir Rp2.000, gratis ongkir saldo mati, toko buka
-const seedSetting = db.prepare(
-  'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'
-);
-seedSetting.run('deliveryFee', '2000');
-seedSetting.run('freeShippingBalance', '0');
-seedSetting.run('storeOpen', '1');
+// FITUR: Inisialisasi database saat start — skema + migrasi + settings default.
+// Dijalankan sebelum server mulai mendengarkan (async, lihat main() di bawah).
+async function initDb() {
+  await client.executeMultiple(SCHEMA_SQL);
+
+  // FITUR: Foto profil warga — migrasi AMAN untuk database lama: tambah
+  // kolom photo (data URL snapshot, nullable) hanya bila belum ada; data
+  // warga lama tetap bisa dibaca (photo = null → tampil inisial).
+  // ALTER gagal bila kolom sudah ada → abaikan error itu.
+  try {
+    await client.execute('ALTER TABLE warga ADD COLUMN photo TEXT NULL');
+  } catch { /* kolom photo sudah ada */ }
+
+  // FITUR: Settings default — ongkir Rp2.000, gratis ongkir saldo mati, toko buka
+  await client.execute(
+    'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
+    ['deliveryFee', '2000']
+  );
+  await client.execute(
+    'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
+    ['freeShippingBalance', '0']
+  );
+  await client.execute(
+    'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
+    ['storeOpen', '1']
+  );
+}
 
 // ============================================================================
 // FITUR: Helper umum
@@ -112,22 +190,10 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-// FITUR: Transaksi atomik (node:sqlite tidak punya db.transaction):
-// BEGIN IMMEDIATE + COMMIT, ROLLBACK bila fn melempar error
-function withTransaction(fn) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    try { db.exec('ROLLBACK'); } catch { /* sudah rollback */ }
-    throw err;
-  }
-}
-
 function sendJson(res, status, obj) {
-  const body = JSON.stringify(obj);
+  // Pengaman: ubah BigInt (mis. lastInsertRowid) jadi Number agar
+  // JSON.stringify tidak melempar error.
+  const body = JSON.stringify(obj, (k, v) => (typeof v === 'bigint' ? Number(v) : v));
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
@@ -185,26 +251,26 @@ function escHtml(s) {
 // ============================================================================
 // FITUR: Settings — baca/tulis (deliveryFee, freeShippingBalance, storeOpen)
 // ============================================================================
-function getSettings() {
-  const rows = db.prepare('SELECT key, value FROM settings').all();
+async function getSettings() {
+  const rows = await q('SELECT key, value FROM settings');
   const out = { deliveryFee: 2000, freeShippingBalance: 0, storeOpen: 1 };
   for (const r of rows) out[r.key] = toInt(r.value, out[r.key]);
   return out;
 }
 
-function setSettings(patch) {
+async function setSettings(patch) {
   const allowed = ['deliveryFee', 'freeShippingBalance', 'storeOpen'];
-  const stmt = db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ' +
-    'ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  );
   for (const key of allowed) {
     if (patch[key] !== undefined && patch[key] !== null) {
       const v = toInt(patch[key]);
       if (v === null) continue;
       // freeShippingBalance & storeOpen hanya 0/1
       const val = (key === 'deliveryFee') ? String(v) : String(v ? 1 : 0);
-      stmt.run(key, val);
+      await run(
+        'INSERT INTO settings (key, value) VALUES (?, ?) ' +
+        'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        [key, val]
+      );
     }
   }
   return getSettings();
@@ -262,18 +328,18 @@ function serveStatic(req, res, urlPath) {
 async function handleApi(req, res, pathname, query) {
   // ---- Settings ------------------------------------------------------------
   if (pathname === '/api/settings' && req.method === 'GET') {
-    return sendJson(res, 200, getSettings());
+    return sendJson(res, 200, await getSettings());
   }
   if (pathname === '/api/settings' && req.method === 'POST') {
     const body = await readBody(req);
-    return sendJson(res, 200, setSettings(body));
+    return sendJson(res, 200, await setSettings(body));
   }
 
   // ---- Produk --------------------------------------------------------------
   if (pathname === '/api/products' && req.method === 'GET') {
-    const rows = db.prepare(
+    const rows = await q(
       'SELECT * FROM products ORDER BY name COLLATE NOCASE ASC'
-    ).all();
+    );
     return sendJson(res, 200, rows);
   }
   if (pathname === '/api/products' && req.method === 'POST') {
@@ -285,22 +351,23 @@ async function handleApi(req, res, pathname, query) {
     if (stock === null || stock < 0) return sendError(res, 400, 'Stok tidak valid');
     const special = b.specialPrice === null || b.specialPrice === undefined || b.specialPrice === ''
       ? null : toInt(b.specialPrice);
-    const info = db.prepare(
+    const info = await run(
       'INSERT INTO products (name, price, specialPrice, stock, category, image, visible) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(
-      String(b.name).trim(), toInt(b.price), special, stock,
-      b.category ? String(b.category) : '',
-      b.image ? String(b.image) : null,
-      b.visible === undefined ? 1 : (b.visible ? 1 : 0)
+      'VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [
+        String(b.name).trim(), toInt(b.price), special, stock,
+        b.category ? String(b.category) : '',
+        b.image ? String(b.image) : null,
+        b.visible === undefined ? 1 : (b.visible ? 1 : 0),
+      ]
     );
-    const row = db.prepare('SELECT * FROM products WHERE id = ?').get(info.lastInsertRowid);
+    const row = await qOne('SELECT * FROM products WHERE id = ?', [numId(info.lastInsertRowid)]);
     return sendJson(res, 201, row);
   }
   const productIdMatch = pathname.match(/^\/api\/products\/(\d+)$/);
   if (productIdMatch && req.method === 'PUT') {
     const id = Number(productIdMatch[1]);
-    const existing = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
+    const existing = await qOne('SELECT * FROM products WHERE id = ?', [id]);
     if (!existing) return sendError(res, 404, 'Produk tidak ditemukan');
     const b = await readBody(req);
     const name = b.name !== undefined ? String(b.name).trim() : existing.name;
@@ -314,16 +381,17 @@ async function handleApi(req, res, pathname, query) {
     if (b.specialPrice === undefined) special = existing.specialPrice;
     else if (b.specialPrice === null || b.specialPrice === '') special = null;
     else special = toInt(b.specialPrice);
-    db.prepare(
-      'UPDATE products SET name=?, price=?, specialPrice=?, stock=?, category=?, image=?, visible=? WHERE id=?'
-    ).run(
-      name, price, special, stock,
-      b.category !== undefined ? String(b.category) : existing.category,
-      b.image !== undefined ? (b.image ? String(b.image) : null) : existing.image,
-      b.visible !== undefined ? (b.visible ? 1 : 0) : existing.visible,
-      id
+    await run(
+      'UPDATE products SET name=?, price=?, specialPrice=?, stock=?, category=?, image=?, visible=? WHERE id=?',
+      [
+        name, price, special, stock,
+        b.category !== undefined ? String(b.category) : existing.category,
+        b.image !== undefined ? (b.image ? String(b.image) : null) : existing.image,
+        b.visible !== undefined ? (b.visible ? 1 : 0) : existing.visible,
+        id,
+      ]
     );
-    return sendJson(res, 200, db.prepare('SELECT * FROM products WHERE id = ?').get(id));
+    return sendJson(res, 200, await qOne('SELECT * FROM products WHERE id = ?', [id]));
   }
 
   // ---- Registrasi & login warga --------------------------------------------
@@ -335,15 +403,18 @@ async function handleApi(req, res, pathname, query) {
     const blok = String(b.blok || '').trim();
     const houseNo = String(b.houseNo || '').trim();
     if (!name || !phone) return sendError(res, 400, 'Nama dan nomor HP wajib diisi');
-    const existing = db.prepare('SELECT * FROM warga WHERE phone = ?').get(phone);
+    const existing = await qOne('SELECT * FROM warga WHERE phone = ?', [phone]);
     if (existing) {
       return sendJson(res, 200, { alreadyRegistered: true, warga: existing });
     }
-    const info = db.prepare(
-      'INSERT INTO warga (name, phone, blok, houseNo, status, balance, createdAt) ' +
-      'VALUES (?, ?, ?, ?, ?, 0, ?)'
-    ).run(name, phone, blok, houseNo, 'pending', nowIso());
-    const warga = db.prepare('SELECT * FROM warga WHERE id = ?').get(info.lastInsertRowid);
+    // FITUR: Foto profil warga — snapshot data URL saat daftar (opsional)
+    const photo = b.photo ? String(b.photo) : null;
+    const info = await run(
+      'INSERT INTO warga (name, phone, blok, houseNo, status, balance, photo, createdAt) ' +
+      'VALUES (?, ?, ?, ?, ?, 0, ?, ?)',
+      [name, phone, blok, houseNo, 'pending', photo, nowIso()]
+    );
+    const warga = await qOne('SELECT * FROM warga WHERE id = ?', [numId(info.lastInsertRowid)]);
     return sendJson(res, 201, { alreadyRegistered: false, warga });
   }
   // FITUR: Login warga by phone
@@ -351,48 +422,70 @@ async function handleApi(req, res, pathname, query) {
     const b = await readBody(req);
     const phone = String(b.phone || '').trim();
     if (!phone) return sendError(res, 400, 'Nomor HP wajib diisi');
-    const warga = db.prepare('SELECT * FROM warga WHERE phone = ?').get(phone);
+    const warga = await qOne('SELECT * FROM warga WHERE phone = ?', [phone]);
     return sendJson(res, 200, { found: !!warga, warga: warga || null });
+  }
+
+  // FITUR: Foto profil warga — ubah foto/nama/blok/nomor rumah warga.
+  // photo boleh data URL baru, atau null/kosong untuk menghapus foto.
+  const profileMatch = pathname.match(/^\/api\/warga\/(\d+)\/profile$/);
+  if (profileMatch && req.method === 'PUT') {
+    const id = Number(profileMatch[1]);
+    const existing = await qOne('SELECT * FROM warga WHERE id = ?', [id]);
+    if (!existing) return sendError(res, 404, 'Warga tidak ditemukan');
+    const b = await readBody(req);
+    const photo = b.photo === undefined ? existing.photo : (b.photo ? String(b.photo) : null);
+    const name = (b.name !== undefined && String(b.name).trim())
+      ? String(b.name).trim() : existing.name;
+    const blok = b.blok !== undefined ? String(b.blok) : existing.blok;
+    const houseNo = b.houseNo !== undefined ? String(b.houseNo) : existing.houseNo;
+    await run(
+      'UPDATE warga SET photo=?, name=?, blok=?, houseNo=? WHERE id=?',
+      [photo, name, blok, houseNo, id]
+    );
+    return sendJson(res, 200, await qOne('SELECT * FROM warga WHERE id = ?', [id]));
   }
 
   // ---- Admin: kelola warga -------------------------------------------------
   if (pathname === '/api/admin/warga' && req.method === 'GET') {
-    const rows = db.prepare(
+    const rows = await q(
       'SELECT * FROM warga ORDER BY createdAt DESC, id DESC'
-    ).all();
+    );
     return sendJson(res, 200, rows);
   }
   const wargaApproveMatch = pathname.match(/^\/api\/admin\/warga\/(\d+)\/approve$/);
   if (wargaApproveMatch && req.method === 'POST') {
     const id = Number(wargaApproveMatch[1]);
-    const warga = db.prepare('SELECT * FROM warga WHERE id = ?').get(id);
+    const warga = await qOne('SELECT * FROM warga WHERE id = ?', [id]);
     if (!warga) return sendError(res, 404, 'Warga tidak ditemukan');
-    db.prepare("UPDATE warga SET status='approved', rejectReason=NULL WHERE id=?").run(id);
-    return sendJson(res, 200, db.prepare('SELECT * FROM warga WHERE id = ?').get(id));
+    await run("UPDATE warga SET status='approved', rejectReason=NULL WHERE id=?", [id]);
+    return sendJson(res, 200, await qOne('SELECT * FROM warga WHERE id = ?', [id]));
   }
   const wargaRejectMatch = pathname.match(/^\/api\/admin\/warga\/(\d+)\/reject$/);
   if (wargaRejectMatch && req.method === 'POST') {
     const id = Number(wargaRejectMatch[1]);
-    const warga = db.prepare('SELECT * FROM warga WHERE id = ?').get(id);
+    const warga = await qOne('SELECT * FROM warga WHERE id = ?', [id]);
     if (!warga) return sendError(res, 404, 'Warga tidak ditemukan');
     const b = await readBody(req);
     const reason = String(b.reason || '').trim();
     if (!reason) return sendError(res, 400, 'Alasan penolakan wajib diisi');
-    db.prepare("UPDATE warga SET status='rejected', rejectReason=? WHERE id=?").run(reason, id);
-    return sendJson(res, 200, db.prepare('SELECT * FROM warga WHERE id = ?').get(id));
+    await run("UPDATE warga SET status='rejected', rejectReason=? WHERE id=?", [reason, id]);
+    return sendJson(res, 200, await qOne('SELECT * FROM warga WHERE id = ?', [id]));
   }
   // FITUR: Riwayat warga — profil + pesanan + top-up + total belanja
   const wargaHistoryMatch = pathname.match(/^\/api\/admin\/warga\/(\d+)\/history$/);
   if (wargaHistoryMatch && req.method === 'GET') {
     const id = Number(wargaHistoryMatch[1]);
-    const warga = db.prepare('SELECT * FROM warga WHERE id = ?').get(id);
+    const warga = await qOne('SELECT * FROM warga WHERE id = ?', [id]);
     if (!warga) return sendError(res, 404, 'Warga tidak ditemukan');
-    const orders = db.prepare(
-      'SELECT * FROM orders WHERE wargaId = ? ORDER BY createdAt DESC, id DESC'
-    ).all(id);
-    const topups = db.prepare(
-      'SELECT * FROM topups WHERE wargaId = ? ORDER BY createdAt DESC, id DESC'
-    ).all(id);
+    const orders = await q(
+      'SELECT * FROM orders WHERE wargaId = ? ORDER BY createdAt DESC, id DESC',
+      [id]
+    );
+    const topups = await q(
+      'SELECT * FROM topups WHERE wargaId = ? ORDER BY createdAt DESC, id DESC',
+      [id]
+    );
     const totalSpent = orders
       .filter((o) => o.status !== 'dibatalkan')
       .reduce((sum, o) => sum + o.total, 0);
@@ -412,50 +505,52 @@ async function handleApi(req, res, pathname, query) {
     if (!['qris', 'transfer', 'tunai'].includes(method)) {
       return sendJson(res, 400, { ok: false, error: 'Metode top-up tidak valid (qris/transfer/tunai)' });
     }
-    const warga = db.prepare('SELECT * FROM warga WHERE id = ?').get(wargaId);
+    const warga = await qOne('SELECT * FROM warga WHERE id = ?', [wargaId]);
     if (!warga) return sendJson(res, 404, { ok: false, error: 'Warga tidak ditemukan' });
-    const pending = db.prepare(
-      "SELECT id FROM topups WHERE wargaId = ? AND status = 'pending' LIMIT 1"
-    ).get(wargaId);
+    const pending = await qOne(
+      "SELECT id FROM topups WHERE wargaId = ? AND status = 'pending' LIMIT 1",
+      [wargaId]
+    );
     if (pending) {
       return sendJson(res, 400, {
         ok: false,
         error: 'Masih ada pengajuan top-up yang menunggu persetujuan. Tunggu sampai diproses admin.',
       });
     }
-    const info = db.prepare(
-      "INSERT INTO topups (wargaId, amount, method, status, createdAt) VALUES (?, ?, ?, 'pending', ?)"
-    ).run(wargaId, amount, method, nowIso());
-    const topup = db.prepare('SELECT * FROM topups WHERE id = ?').get(info.lastInsertRowid);
+    const info = await run(
+      "INSERT INTO topups (wargaId, amount, method, status, createdAt) VALUES (?, ?, ?, 'pending', ?)",
+      [wargaId, amount, method, nowIso()]
+    );
+    const topup = await qOne('SELECT * FROM topups WHERE id = ?', [numId(info.lastInsertRowid)]);
     return sendJson(res, 201, { ok: true, topup });
   }
   if (pathname === '/api/topup/pending' && req.method === 'GET') {
-    const rows = db.prepare(
+    const rows = await q(
       "SELECT t.*, w.name AS wargaName, w.phone AS wargaPhone " +
       'FROM topups t JOIN warga w ON w.id = t.wargaId ' +
       "WHERE t.status = 'pending' ORDER BY t.createdAt ASC, t.id ASC"
-    ).all();
+    );
     return sendJson(res, 200, rows);
   }
   const topupApproveMatch = pathname.match(/^\/api\/topup\/(\d+)\/approve$/);
   if (topupApproveMatch && req.method === 'POST') {
     const id = Number(topupApproveMatch[1]);
-    const topup = db.prepare('SELECT * FROM topups WHERE id = ?').get(id);
+    const topup = await qOne('SELECT * FROM topups WHERE id = ?', [id]);
     if (!topup) return sendError(res, 404, 'Top-up tidak ditemukan');
     if (topup.status !== 'pending') {
       return sendError(res, 400, 'Top-up sudah diproses sebelumnya');
     }
     // FITUR: Approve top-up menambah saldo warga (atomik)
-    withTransaction(() => {
-      db.prepare("UPDATE topups SET status='approved' WHERE id=?").run(id);
-      db.prepare('UPDATE warga SET balance = balance + ? WHERE id = ?').run(topup.amount, topup.wargaId);
+    await withTransaction(async (tx) => {
+      await run("UPDATE topups SET status='approved' WHERE id=?", [id], tx);
+      await run('UPDATE warga SET balance = balance + ? WHERE id = ?', [topup.amount, topup.wargaId], tx);
     });
-    return sendJson(res, 200, db.prepare('SELECT * FROM topups WHERE id = ?').get(id));
+    return sendJson(res, 200, await qOne('SELECT * FROM topups WHERE id = ?', [id]));
   }
   const topupRejectMatch = pathname.match(/^\/api\/topup\/(\d+)\/reject$/);
   if (topupRejectMatch && req.method === 'POST') {
     const id = Number(topupRejectMatch[1]);
-    const topup = db.prepare('SELECT * FROM topups WHERE id = ?').get(id);
+    const topup = await qOne('SELECT * FROM topups WHERE id = ?', [id]);
     if (!topup) return sendError(res, 404, 'Top-up tidak ditemukan');
     if (topup.status !== 'pending') {
       return sendError(res, 400, 'Top-up sudah diproses sebelumnya');
@@ -463,23 +558,24 @@ async function handleApi(req, res, pathname, query) {
     const b = await readBody(req);
     const reason = String(b.reason || '').trim();
     if (!reason) return sendError(res, 400, 'Alasan penolakan wajib diisi');
-    db.prepare("UPDATE topups SET status='rejected', rejectReason=? WHERE id=?").run(reason, id);
-    return sendJson(res, 200, db.prepare('SELECT * FROM topups WHERE id = ?').get(id));
+    await run("UPDATE topups SET status='rejected', rejectReason=? WHERE id=?", [reason, id]);
+    return sendJson(res, 200, await qOne('SELECT * FROM topups WHERE id = ?', [id]));
   }
   const balanceMatch = pathname.match(/^\/api\/warga\/(\d+)\/balance$/);
   if (balanceMatch && req.method === 'GET') {
-    const warga = db.prepare('SELECT balance FROM warga WHERE id = ?').get(Number(balanceMatch[1]));
+    const warga = await qOne('SELECT balance FROM warga WHERE id = ?', [Number(balanceMatch[1])]);
     if (!warga) return sendError(res, 404, 'Warga tidak ditemukan');
     return sendJson(res, 200, { balance: warga.balance });
   }
   // FITUR: Status top-up warga — untuk menyembunyikan form bila ada pending
   const topupStatusMatch = pathname.match(/^\/api\/warga\/(\d+)\/topup-status$/);
   if (topupStatusMatch && req.method === 'GET') {
-    const warga = db.prepare('SELECT id FROM warga WHERE id = ?').get(Number(topupStatusMatch[1]));
+    const warga = await qOne('SELECT id FROM warga WHERE id = ?', [Number(topupStatusMatch[1])]);
     if (!warga) return sendError(res, 404, 'Warga tidak ditemukan');
-    const pending = db.prepare(
-      "SELECT id FROM topups WHERE wargaId = ? AND status = 'pending' LIMIT 1"
-    ).get(Number(topupStatusMatch[1]));
+    const pending = await qOne(
+      "SELECT id FROM topups WHERE wargaId = ? AND status = 'pending' LIMIT 1",
+      [Number(topupStatusMatch[1])]
+    );
     return sendJson(res, 200, { hasPending: !!pending });
   }
 
@@ -506,11 +602,11 @@ async function handleApi(req, res, pathname, query) {
     if (!validSlots.includes(slot)) {
       return sendJson(res, 400, { ok: false, error: 'Jam antar/ambil tidak valid' });
     }
-    const settings = getSettings();
+    const settings = await getSettings();
     if (settings.storeOpen === 0) {
       return sendJson(res, 400, { ok: false, error: 'Toko sedang tutup, pesanan belum bisa dibuat' });
     }
-    const warga = db.prepare('SELECT * FROM warga WHERE id = ?').get(wargaId);
+    const warga = await qOne('SELECT * FROM warga WHERE id = ?', [wargaId]);
     if (!warga) return sendJson(res, 404, { ok: false, error: 'Warga tidak ditemukan' });
     if (warga.status !== 'approved') {
       return sendJson(res, 403, { ok: false, error: 'Akun belum disetujui admin, belum bisa belanja' });
@@ -525,7 +621,7 @@ async function handleApi(req, res, pathname, query) {
       if (!productId || !qty || qty <= 0) {
         return sendJson(res, 400, { ok: false, error: 'Jumlah barang tidak valid' });
       }
-      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
+      const product = await qOne('SELECT * FROM products WHERE id = ?', [productId]);
       if (!product) {
         return sendJson(res, 400, { ok: false, error: 'Ada barang yang tidak ditemukan' });
       }
@@ -559,20 +655,23 @@ async function handleApi(req, res, pathname, query) {
 
     // Simpan pesanan + kurangi stok + kurangi saldo (atomik)
     let orderId;
-    withTransaction(() => {
-      const info = db.prepare(
+    await withTransaction(async (tx) => {
+      const info = await run(
         'INSERT INTO orders (wargaId, wargaName, items, subtotal, deliveryFee, total, ' +
-        "payment, method, slot, note, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'baru', ?)"
-      ).run(wargaId, warga.name, JSON.stringify(items), subtotal, deliveryFee, total,
-        payment, method, slot, note, nowIso());
-      orderId = info.lastInsertRowid;
-      const decStock = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ?');
-      for (const it of items) decStock.run(it.qty, it.productId);
+        "payment, method, slot, note, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'baru', ?)",
+        [wargaId, warga.name, JSON.stringify(items), subtotal, deliveryFee, total,
+          payment, method, slot, note, nowIso()],
+        tx
+      );
+      orderId = numId(info.lastInsertRowid);
+      for (const it of items) {
+        await run('UPDATE products SET stock = stock - ? WHERE id = ?', [it.qty, it.productId], tx);
+      }
       if (payment === 'saldo') {
-        db.prepare('UPDATE warga SET balance = balance - ? WHERE id = ?').run(total, wargaId);
+        await run('UPDATE warga SET balance = balance - ? WHERE id = ?', [total, wargaId], tx);
       }
     });
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    const order = await qOne('SELECT * FROM orders WHERE id = ?', [orderId]);
     return sendJson(res, 201, { ok: true, order });
   }
 
@@ -582,7 +681,7 @@ async function handleApi(req, res, pathname, query) {
     const params = [];
     if (query.date) {
       // createdAt disimpan ISO; filter berdasarkan tanggal UTC dari ISO
-      conditions.push("substr(createdAt, 1, 10) = ?");
+      conditions.push('substr(createdAt, 1, 10) = ?');
       params.push(query.date);
     }
     if (query.slot) {
@@ -590,18 +689,20 @@ async function handleApi(req, res, pathname, query) {
       params.push(query.slot);
     }
     const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-    const rows = db.prepare(
-      `SELECT * FROM orders ${where} ORDER BY createdAt DESC, id DESC`
-    ).all(...params);
+    const rows = await q(
+      `SELECT * FROM orders ${where} ORDER BY createdAt DESC, id DESC`,
+      params
+    );
     return sendJson(res, 200, rows);
   }
 
   const wargaOrdersMatch = pathname.match(/^\/api\/warga\/(\d+)\/orders$/);
   if (wargaOrdersMatch && req.method === 'GET') {
     const wargaId = Number(wargaOrdersMatch[1]);
-    const rows = db.prepare(
-      'SELECT * FROM orders WHERE wargaId = ? ORDER BY createdAt DESC, id DESC'
-    ).all(wargaId);
+    const rows = await q(
+      'SELECT * FROM orders WHERE wargaId = ? ORDER BY createdAt DESC, id DESC',
+      [wargaId]
+    );
     return sendJson(res, 200, rows);
   }
 
@@ -611,7 +712,7 @@ async function handleApi(req, res, pathname, query) {
     const id = Number(cancelMatch[1]);
     const b = await readBody(req);
     const wargaId = toInt(b.wargaId);
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+    const order = await qOne('SELECT * FROM orders WHERE id = ?', [id]);
     if (!order) return sendJson(res, 404, { ok: false, error: 'Pesanan tidak ditemukan' });
     if (order.wargaId !== wargaId) {
       return sendJson(res, 403, { ok: false, error: 'Pesanan ini bukan milik Anda' });
@@ -624,15 +725,16 @@ async function handleApi(req, res, pathname, query) {
     }
     // Kembalikan stok + kembalikan saldo bila bayar pakai saldo (atomik)
     const items = JSON.parse(order.items);
-    withTransaction(() => {
-      db.prepare("UPDATE orders SET status='dibatalkan' WHERE id=?").run(id);
-      const incStock = db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?');
-      for (const it of items) incStock.run(it.qty, it.productId);
+    await withTransaction(async (tx) => {
+      await run("UPDATE orders SET status='dibatalkan' WHERE id=?", [id], tx);
+      for (const it of items) {
+        await run('UPDATE products SET stock = stock + ? WHERE id = ?', [it.qty, it.productId], tx);
+      }
       if (order.payment === 'saldo') {
-        db.prepare('UPDATE warga SET balance = balance + ? WHERE id = ?').run(order.total, order.wargaId);
+        await run('UPDATE warga SET balance = balance + ? WHERE id = ?', [order.total, order.wargaId], tx);
       }
     });
-    const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+    const updated = await qOne('SELECT * FROM orders WHERE id = ?', [id]);
     return sendJson(res, 200, { ok: true, order: updated });
   }
 
@@ -640,7 +742,7 @@ async function handleApi(req, res, pathname, query) {
   const statusMatch = pathname.match(/^\/api\/orders\/(\d+)\/status$/);
   if (statusMatch && req.method === 'POST') {
     const id = Number(statusMatch[1]);
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+    const order = await qOne('SELECT * FROM orders WHERE id = ?', [id]);
     if (!order) return sendError(res, 404, 'Pesanan tidak ditemukan');
     const b = await readBody(req);
     const next = String(b.status || '');
@@ -649,14 +751,14 @@ async function handleApi(req, res, pathname, query) {
       return sendError(res, 400,
         `Status pesanan tidak bisa diubah dari "${order.status}" ke "${next || '(kosong)'}"`);
     }
-    db.prepare('UPDATE orders SET status=? WHERE id=?').run(next, id);
-    return sendJson(res, 200, db.prepare('SELECT * FROM orders WHERE id = ?').get(id));
+    await run('UPDATE orders SET status=? WHERE id=?', [next, id]);
+    return sendJson(res, 200, await qOne('SELECT * FROM orders WHERE id = ?', [id]));
   }
 
   // FITUR: Struk pesanan — halaman HTML gaya kertas thermal + tombol Cetak
   const strukMatch = pathname.match(/^\/api\/orders\/(\d+)\/struk$/);
   if (strukMatch && req.method === 'GET') {
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(strukMatch[1]));
+    const order = await qOne('SELECT * FROM orders WHERE id = ?', [Number(strukMatch[1])]);
     if (!order) return sendError(res, 404, 'Pesanan tidak ditemukan');
     const items = JSON.parse(order.items);
     const rupiah = (n) => 'Rp' + Number(n).toLocaleString('id-ID');
@@ -713,18 +815,31 @@ async function handleApi(req, res, pathname, query) {
   // ---- Chat toko ------------------------------------------------------------
   // FITUR: Daftar thread chat — per warga, badge belum dibaca admin
   if (pathname === '/api/chat/threads' && req.method === 'GET') {
-    const wargaList = db.prepare('SELECT id, name FROM warga ORDER BY name COLLATE NOCASE ASC').all();
+    // FITUR: Foto profil warga — ikut dikirim supaya Admin melihat foto
+    // warga di daftar chat (null bila warga belum pasang foto).
+    const wargaList = await q('SELECT id, name, photo FROM warga ORDER BY name COLLATE NOCASE ASC');
+    // Ambil pesan terakhir tiap warga + hitungan belum dibaca dalam 2 query
+    // gabungan (bukan N+1) — penting karena Turso jarak jauh: tiap query
+    // adalah round-trip HTTP.
+    const lastMsgs = await q(
+      'SELECT m.* FROM messages m WHERE m.id IN ' +
+      '(SELECT MAX(id) FROM messages GROUP BY wargaId)'
+    );
+    const lastByWarga = {};
+    for (const m of lastMsgs) lastByWarga[m.wargaId] = m;
+    const unreadRows = await q(
+      "SELECT wargaId, COUNT(*) AS c FROM messages " +
+      "WHERE sender = 'warga' AND readByAdmin = 0 GROUP BY wargaId"
+    );
+    const unreadByWarga = {};
+    for (const r of unreadRows) unreadByWarga[r.wargaId] = r.c;
     const threads = wargaList.map((w) => {
-      const last = db.prepare(
-        'SELECT * FROM messages WHERE wargaId = ? ORDER BY createdAt DESC, id DESC LIMIT 1'
-      ).get(w.id);
-      const unread = db.prepare(
-        "SELECT COUNT(*) AS c FROM messages WHERE wargaId = ? AND sender = 'warga' AND readByAdmin = 0"
-      ).get(w.id);
+      const last = lastByWarga[w.id] || null;
       return {
         wargaId: w.id,
         wargaName: w.name,
-        unreadAdmin: unread.c,
+        wargaPhoto: w.photo || null,
+        unreadAdmin: unreadByWarga[w.id] || 0,
         lastMessage: last
           ? { text: last.text, image: !!last.image, sender: last.sender, createdAt: last.createdAt }
           : null,
@@ -735,17 +850,19 @@ async function handleApi(req, res, pathname, query) {
   const chatMatch = pathname.match(/^\/api\/chat\/(\d+)$/);
   if (chatMatch && req.method === 'GET') {
     const wargaId = Number(chatMatch[1]);
-    const messages = db.prepare(
-      'SELECT * FROM messages WHERE wargaId = ? ORDER BY createdAt ASC, id ASC'
-    ).all(wargaId);
-    const unread = db.prepare(
-      "SELECT COUNT(*) AS c FROM messages WHERE wargaId = ? AND sender = 'admin' AND readByWarga = 0"
-    ).get(wargaId);
+    const messages = await q(
+      'SELECT * FROM messages WHERE wargaId = ? ORDER BY createdAt ASC, id ASC',
+      [wargaId]
+    );
+    const unread = await qOne(
+      "SELECT COUNT(*) AS c FROM messages WHERE wargaId = ? AND sender = 'admin' AND readByWarga = 0",
+      [wargaId]
+    );
     return sendJson(res, 200, { messages, unreadWarga: unread.c });
   }
   if (chatMatch && req.method === 'POST') {
     const wargaId = Number(chatMatch[1]);
-    const warga = db.prepare('SELECT id FROM warga WHERE id = ?').get(wargaId);
+    const warga = await qOne('SELECT id FROM warga WHERE id = ?', [wargaId]);
     if (!warga) return sendError(res, 404, 'Warga tidak ditemukan');
     const b = await readBody(req);
     const sender = String(b.sender || '');
@@ -758,11 +875,12 @@ async function handleApi(req, res, pathname, query) {
     // FITUR: Pesan baru dari warga → belum dibaca admin; dari admin → belum dibaca warga
     const readByAdmin = sender === 'admin' ? 1 : 0;
     const readByWarga = sender === 'warga' ? 1 : 0;
-    const info = db.prepare(
+    const info = await run(
       'INSERT INTO messages (wargaId, sender, text, image, createdAt, readByAdmin, readByWarga) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(wargaId, sender, text, image, nowIso(), readByAdmin, readByWarga);
-    return sendJson(res, 201, db.prepare('SELECT * FROM messages WHERE id = ?').get(info.lastInsertRowid));
+      'VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [wargaId, sender, text, image, nowIso(), readByAdmin, readByWarga]
+    );
+    return sendJson(res, 201, await qOne('SELECT * FROM messages WHERE id = ?', [numId(info.lastInsertRowid)]));
   }
   // FITUR: Tandai semua pesan di thread sudah dibaca oleh pihak yang membuka
   const chatReadMatch = pathname.match(/^\/api\/chat\/(\d+)\/read$/);
@@ -771,9 +889,9 @@ async function handleApi(req, res, pathname, query) {
     const b = await readBody(req);
     const by = String(b.by || '');
     if (by === 'admin') {
-      db.prepare("UPDATE messages SET readByAdmin = 1 WHERE wargaId = ? AND sender = 'warga'").run(wargaId);
+      await run("UPDATE messages SET readByAdmin = 1 WHERE wargaId = ? AND sender = 'warga'", [wargaId]);
     } else if (by === 'warga') {
-      db.prepare("UPDATE messages SET readByWarga = 1 WHERE wargaId = ? AND sender = 'admin'").run(wargaId);
+      await run("UPDATE messages SET readByWarga = 1 WHERE wargaId = ? AND sender = 'admin'", [wargaId]);
     } else {
       return sendError(res, 400, "Parameter 'by' harus 'admin' atau 'warga'");
     }
@@ -812,7 +930,17 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`tokoku berjalan di http://localhost:${PORT}`);
-  console.log(`Database: ${DB_PATH}`);
+// FITUR: Start — inisialisasi database dulu (skema + migrasi + default),
+// baru dengarkan port. Bila init gagal, proses keluar dengan error jelas.
+async function main() {
+  await initDb();
+  server.listen(PORT, () => {
+    console.log(`tokoku berjalan di http://localhost:${PORT}`);
+    console.log(USE_TURSO ? 'Database: Turso (remote)' : `Database: file lokal ${DB_PATH}`);
+  });
+}
+
+main().catch((err) => {
+  console.error('Gagal memulai server:', err);
+  process.exit(1);
 });

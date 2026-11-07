@@ -2,7 +2,8 @@
 
 Aplikasi web toko klontong "tokoku" khusus warga Perum GKR, dibangun ulang
 agar bisa dibuka lewat tautan publik dengan database bersama. Satu server
-Node.js tanpa dependensi eksternal melayani frontend dan API; data di SQLite.
+Node.js melayani frontend dan API; data tinggal di Turso (libSQL, gratis)
+bila env `TURSO_DATABASE_URL` tersedia, bila tidak di file SQLite lokal.
 
 Versi Muse (artifact slug `toko-klontong`) tetap menjadi tempat pertama
 setiap pembaruan dibuat — lihat `PORTING.md` untuk cara memindahkannya ke sini.
@@ -10,17 +11,21 @@ Daftar fitur ada di `FITUR.md`.
 
 ## Menjalankan lokal
 
-Butuh Node.js 22 atau lebih baru (memakai `node:sqlite` bawaan).
+Butuh Node.js 22 atau lebih baru.
 
 ```bash
 cd toko-klontong-publik
+npm install
 node server.js
 # buka http://localhost:3000
 ```
 
-Database dibuat otomatis di `data/tokoku.db` (kosong saat pertama jalan).
-Variabel lingkungan: `PORT` (default 3000), `DB_PATH` (default
-`data/tokoku.db` — isi dengan path disk persisten saat deploy).
+Tanpa env Turso, database dibuat otomatis di `data/tokoku.db` (kosong saat
+pertama jalan) — hanya untuk pengembangan/uji lokal. Variabel lingkungan:
+`PORT` (default 3000), `DB_PATH` (default `data/tokoku.db`, hanya untuk
+fallback lokal), `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` (pakai Turso
+jarak jauh — inilah yang dipakai di Render, supaya data tidak hilang
+saat deploy).
 
 ## Deploy ke URL publik
 
@@ -42,14 +47,26 @@ repo GitHub `orlando12134/tokoku`, branch `main`).
    saat pembuatan service; angka acak ditambahkan Render bila nama sudah
    dipakai).
 
-**Peringatan data — baca sebelum memakai serius:**
-- Paket **Free Render memakai filesystem ephemeral**: database SQLite
-  hilang setiap deploy/restart. Cocok untuk uji coba, TIDAK untuk
-  pemakaian serius.
-- Supaya data bertahan, perlu paket **Starter (berbayar, sekitar
-  $7/bulan)** + **Persistent Disk** (mount path mis. `/var/data`, lalu
-  set env `DB_PATH=/var/data/tokoku.db`), atau pakai PostgreSQL
-  terkelola Render.
+**Data aman saat deploy (sejak migrasi Turso 2026-11-08):**
+- Data live tinggal di **Turso (libSQL, gratis)** — bukan lagi di file
+  SQLite di Render. Deploy/restart **tidak lagi menghapus data**:
+  barang, warga, pesanan, dan saldo tetap ada setelah update.
+- Env `TURSO_DATABASE_URL` dan `TURSO_AUTH_TOKEN` sudah tersimpan di
+  Render (dashboard → service `tokoku` → Environment). **Jangan
+  membagikan token itu** — siapa pun yang memegangnya bisa membaca
+  dan mengubah seluruh data toko.
+- **Backup berkala tetap disarankan** (bukan lagi wajib sebelum tiap
+  deploy): sesekali salin isi database Turso lewat dashboard Turso
+  (atau `sqld`/CLI Turso) dan simpan salinannya di tempat aman.
+  Jangan menambahkan endpoint unduh database tanpa pengaman — Admin
+  saat ini tanpa kata sandi.
+- Dulu (sebelum 2026-11-08) paket Free Render memakai filesystem
+  ephemeral sehingga database SQLite hilang setiap deploy/restart;
+  pada 2026-11-07 malam barang dan warga yang sudah dimasukkan hilang
+  karena deploy tanpa backup. Masalah itu selesai dengan Turso —
+  file `data/tokoku.db` sekarang hanya fallback lokal.
+- Supaya data bertahan, **tidak perlu lagi** paket Starter berbayar +
+  Persistent Disk — Turso gratis sudah menanganinya.
 - Paket Free juga "tidur" setelah 15 menit tanpa kunjungan; kunjungan
   pertama setelah itu lambat (±30–60 detik) sampai server bangun.
 
@@ -65,6 +82,74 @@ Railway daripada Render.
 Keduanya serverless — SQLite lokal tidak bertahan antar request, jadi
 perlu database eksternal (mis. Supabase Postgres gratis) dan penulisan
 ulang lapisan database. Hanya dipilih bila Andrik memang mau jalur itu.
+
+## Uji lokal (ringkasan hasil 2026-11-08 — migrasi database ke Turso)
+
+Diuji end-to-end lewat HTTP + browser Chromium headless (lebar HP 390px)
+terhadap server lokal (database uji terpisah di /tmp, sudah dihapus;
+database produksi tidak tersentuh, hash SHA-256 tetap
+`ced51d79b366e536fe4fcb16057d57aa2cd890b6315788749477c52ca0ffdfd0`):
+**60 pemeriksaan API lulus (22 dari skrip lama + 38 tambahan), 31
+pemeriksaan browser lulus, 0 gagal.**
+
+- Semua endpoint `/api/*` berperilaku identik setelah migrasi
+  (format respons, kode status, pesan error sama): settings default;
+  daftar warga (dengan foto profil) → verifikasi → top-up → setujui →
+  belanja saldo (harga spesial) + tunai → batalkan pesanan (saldo & stok
+  kembali) → chat teks + gambar + lencana belum dibaca → status toko
+  tutup memblokir order → ubah ongkir → gratis ongkir saldo → struk
+  (memuat "Mohon bayar dengan uang pas") → pencarian pesanan by tanggal/
+  jam → riwayat warga → penolakan warga/top-up dengan alasan → blokir
+  top-up duplikat saat pending → daftar ulang nomor sama kembali ke akun
+  lama.
+- Transaksi tetap atomik (buat pesanan: simpan order + kurangi stok +
+  potong saldo; batalkan: kembalikan stok + saldo; setujui top-up:
+  tambah saldo) — sekarang via `client.transaction('write')` libsql.
+- Restart server dengan DB file yang sama: data tetap utuh (5 warga,
+  5 pesanan, 4 produk, settings) — tidak ada yang hilang.
+- Cabang env Turso diuji dengan `TURSO_DATABASE_URL=file:...` (tanpa
+  token): server mencatat "Database: Turso (remote)" dan API berjalan
+  normal — jalur kode yang sama dengan Turso jarak jauh; yang belum
+  bisa diuji lokal hanyalah round-trip jaringan ke Turso (token tidak
+  tersedia di lingkungan uji) — itu diverifikasi setelah deploy live.
+- Migrasi DB lama: database tanpa kolom `photo` tetap terbaca
+  (`photo: null`), kolom ditambah otomatis, update foto ke warga lama
+  berhasil.
+- Browser 390px: foto profil (daftar, Admin, Akun, ganti foto), status
+  toko live tanpa refresh, modal batalkan pesanan (0 dialog bawaan),
+  tanpa overflow horizontal.
+- Satu-satunya perubahan perilaku yang disengaja: `GET /api/chat/threads`
+  kini memakai 3 query gabungan (bukan N+1 per warga) supaya polling
+  tetap cepat lewat Turso jarak jauh; bentuk responsnya sama persis.
+
+## Uji lokal (ringkasan hasil 2026-11-08 — 3 perbaikan: status toko live, foto profil, modal konfirmasi)
+
+Diuji end-to-end lewat HTTP + browser Chromium headless (lebar HP 390px)
+terhadap server lokal di port 3101 (database uji terpisah, sudah dihapus;
+database produksi tidak tersentuh, hash SHA-256 tetap
+`ced51d79b366e536fe4fcb16057d57aa2cd890b6315788749477c52ca0ffdfd0`):
+**22 pemeriksaan API lulus, 31 pemeriksaan browser lulus, 0 gagal.**
+Migrasi aman juga diuji terpisah: database lama tanpa kolom `photo`
+tetap terbaca (warga lama tampil `photo: null`), kolom ditambah otomatis,
+dan update foto ke warga lama berhasil.
+
+- Status toko live: admin menutup toko lewat saklar Beranda → warga
+  (tanpa refresh, lewat polling) langsung "Toko Tutup" + etalase hilang;
+  dibuka lagi → "Toko Buka" + etalase muncul. Sebaliknya: ubah via API
+  → header Admin (tab Warga) dan saklar Beranda ikut berubah setelah
+  polling.
+- Foto profil: daftar dengan foto (pratinjau tampil) → tersimpan di
+  server; foto tampil di daftar warga Admin, riwayat warga (+ info
+  saldo), dan daftar chat; warga tanpa foto tampil inisial (mis. "SA");
+  ganti foto di Akun → foto baru tampil di Akun dan di Admin setelah
+  polling; hapus foto dan update profil via `PUT /api/warga/:id/profile`
+  teruji via API.
+- Modal batalkan pesanan: klik "Batalkan pesanan" membuka modal buatan
+  sendiri (overlay hijau lembut, "Ya, batalkan pesanan" / "Tidak jadi",
+  tanpa dialog bawaan browser — 0 event dialog tercatat); "Tidak jadi"
+  menutup modal dan pesanan tetap Baru; "Ya, batalkan pesanan" →
+  Dibatalkan, saldo Budi kembali Rp100.000, stok Gula kembali 10.
+- Lebar HP 390px: tidak ada overflow horizontal di Warga maupun Admin.
 
 ## Uji lokal (ringkasan hasil 2026-11-07 malam — 5 perbaikan dari versi Muse)
 
@@ -136,7 +221,9 @@ ke warga — sesuai skill `app_creation_phone_check`.
 ## Struktur
 
 ```
-server.js            Server + API + SQLite (tanpa dependensi)
+server.js            Server + API + database Turso (libSQL) / file lokal
+package.json         Satu-satunya dependensi: @libsql/client
+package-lock.json    Versi dependensi yang terkunci (ikut di-push)
 public/warga.html    Aplikasi Warga (rute /)
 public/warga.js      Logika aplikasi Warga
 public/admin.html    Aplikasi Admin (rute /admin)
@@ -146,7 +233,8 @@ public/index.html    Pengalihan ke / (aplikasi Warga)
 public/style.css     Tampilan mobile-first
 public/logo.png      Logo keranjang hijau TOKOKU
 public/qris.jpg      Kode QRIS (Toko Khayla)
-data/tokoku.db       Database (dibuat otomatis; kosong di awal)
+data/tokoku.db       Database file lokal — HANYA fallback dev/uji lokal;
+                     data live tinggal di Turso (lihat di atas)
 FITUR.md             Daftar fitur versi publik
 PORTING.md           Cara memindahkan perubahan dari versi Muse
 render.yaml          Blueprint Render (lihat peringatan data di atas)
