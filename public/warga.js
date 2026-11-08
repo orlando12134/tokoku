@@ -20,6 +20,10 @@ var liveTimer = null;
 var lastLive = { orders: '', balance: null, topupPending: null, warga: '', products: '', settings: '', unread: null };
 var detailProductId = null;
 var detailQty = 1;
+// FITUR: Menu kategori di Belanja warga — kategori yang sedang dipilih
+// ('Semua' = semua barang); dipertahankan saat etalase diperbarui polling
+// maupun saat buka/tutup detail produk; keranjang tidak terpengaruh.
+var shopCategory = 'Semua';
 // FITUR: Foto profil warga — foto yang dipilih saat daftar / di Akun,
 // dikirim sebagai snapshot data URL (seperti foto barang/chat).
 var pendingRegPhoto = null;
@@ -306,7 +310,29 @@ function renderShop(view) {
     view.innerHTML = '<div class="shop-wrap"><div class="card"><h1>Maaf, tokoku sedang tutup</h1><p>Toko sedang tutup. Etalase dan pemesanan tidak tersedia saat ini. Silakan kembali lagi saat toko buka.</p></div></div>';
     return;
   }
-  var list = visibleProducts();
+  var all = visibleProducts();
+  // FITUR: Menu kategori di Belanja warga (2026-11-08) — chip per kategori
+  // dari barang yang tampil + jumlah barangnya. Daftar diambil otomatis
+  // dari data (kategori baru muncul sendiri, kategori yang barangnya sudah
+  // tidak ada hilang sendiri); barang tanpa kategori masuk "Lainnya".
+  // Hanya barang yang tampil yang dihitung — barang tersembunyi tidak
+  // memunculkan kategori.
+  var counts = {};
+  var cats = [];
+  all.forEach(function (p) {
+    var c = (p.category || '').trim() || 'Lainnya';
+    if (counts[c] == null) { counts[c] = 0; cats.push(c); }
+    counts[c]++;
+  });
+  // Bila kategori yang dipilih sudah tidak ada barangnya (mis. Admin
+  // menyembunyikan semuanya), kembali ke "Semua" supaya grid tidak kosong.
+  if (shopCategory !== 'Semua' && counts[shopCategory] == null) shopCategory = 'Semua';
+  var list = shopCategory === 'Semua' ? all : all.filter(function (p) { return ((p.category || '').trim() || 'Lainnya') === shopCategory; });
+  var chips = '<div class="cat-row">' +
+    '<button type="button" class="cat-chip' + (shopCategory === 'Semua' ? ' active' : '') + '" onclick="setShopCategory(\'Semua\')">Semua (' + all.length + ')</button>' +
+    cats.map(function (c) {
+      return '<button type="button" class="cat-chip' + (shopCategory === c ? ' active' : '') + '" onclick="setShopCategory(' + jsQuote(c) + ')">' + esc(c) + ' (' + counts[c] + ')</button>';
+    }).join('') + '</div>';
   var cards = list.map(function (p) {
     var inCart = cart.find(function (c) { return String(c.productId) === String(p.id); });
     var qty = inCart ? inCart.qty : 0;
@@ -322,9 +348,16 @@ function renderShop(view) {
       '<button type="button" onclick="changeQty(' + JSON.stringify(p.id) + ',1)" aria-label="Tambah">+</button>' +
       '<button type="button" class="btn btn-small" style="margin-left:auto" onclick="changeQty(' + JSON.stringify(p.id) + ',1)">+ Keranjang</button></div></div>';
   }).join('');
-  view.innerHTML = '<div class="shop-wrap"><h1>Belanja</h1>' +
-    (list.length ? '<div class="product-grid">' + cards + '</div>' : '<div class="card"><p>Belum ada barang di etalase.</p></div>') + '</div>';
+  view.innerHTML = '<div class="shop-wrap"><h1>Belanja</h1>' + chips +
+    (list.length ? '<div class="product-grid">' + cards + '</div>' : '<div class="card"><p>Tidak ada barang di kategori ini.</p></div>') + '</div>';
 }
+// FITUR: Menu kategori — pilih kategori lalu gambar ulang etalase.
+// Keranjang tidak disentuh; pilihan tersimpan di shopCategory sehingga
+// tetap saat polling memperbarui etalase maupun saat buka/tutup detail.
+function setShopCategory(c) { shopCategory = c; render(); }
+// Kutip string untuk atribut onclick="...('...')" — JSON.stringify tidak
+// bisa dipakai di sini karena tanda petik gandanya memutus atribut HTML.
+function jsQuote(s) { return "'" + String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'"; }
 
 function changeQty(productId, delta) {
   var p = findProduct(productId); if (!p) return;
