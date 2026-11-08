@@ -125,7 +125,32 @@ jangan isi ulang manual dulu — cek dulu dashboard Turso (apakah database
 masih ada dan berisi data) dan log deploy Render; bila database Turso
 masih utuh, masalahnya di koneksi (env var), bukan di data.
 
-## Yang belum ada (ide untuk pembaruan berikutnya)
+## Perbaikan 2026-11-08 siang (laporan Andrik: foto profil, harga spesial di keranjang, verifikasi top-up + bukti pembayaran)
+
+Port dari versi Muse (v14) ke publik, setelah perbaikan transaksi Turso
+(commit f7c93bc, live 11:11 WIB) dan persetujuan top-up Tri wahyu Rp50.000.
+
+- **Foto profil:** foto warga kini tampil juga di kartu verifikasi top-up
+  Admin (sebelumnya kartu itu tidak menampilkan foto) — pending API ikut
+  mengirim `wargaPhoto`. Semua gambar (foto profil, foto barang, gambar
+  chat, bukti top-up) diperkecil otomatis di sisi warga sebelum dikirim
+  (`readImageFile` di `common.js`, canvas: profil 800px, barang/chat
+  1000px, bukti 1200px) karena foto kamera HP 3-5MB melebihi batas body
+  server ~5MB sehingga gagal tersimpan.
+- **Harga spesial di keranjang:** baris barang di halaman Keranjang memakai
+  harga sesuai cara bayar yang dipilih (spesial + harga normal dicoret +
+  catatan saat saldo; normal saat tunai) dan ikut berubah saat radio cara
+  bayar diganti (`cartItemsHtml(payment)` di `warga.js`).
+- **Bukti pembayaran top-up:** kolom `proof` (nullable, migrasi AMAN) di
+  `topups`; `POST /api/topup` menerima `proof` opsional; form top-up warga
+  punya lampiran bukti (pratinjau, hapus; disembunyikan untuk tunai);
+  kartu verifikasi Admin menampilkan thumbnail bukti (klik → modal ukuran
+  penuh) atau "Tanpa bukti pembayaran"; riwayat warga di Admin punya tautan
+  "Lihat bukti".
+- **Uji lokal sebelum deploy:** regresi API 32 pemeriksaan lolos (termasuk
+  semua jalur transaksi), API bukti lolos, browser HP 20 pemeriksaan lolos
+  (foto 5MB → 201KB tersimpan, keranjang saldo/tunai, bukti ujung ke ujung
+  sampai saldo bertambah).
 
 - PIN/kata sandi untuk mode Admin (saat ini saklar mode tanpa kata sandi).
 - Pencarian barang di katalog warga.

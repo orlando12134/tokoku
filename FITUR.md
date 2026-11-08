@@ -165,7 +165,8 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 
 ### Warga — akun
 - [x] Daftar: nama, nomor HP, blok (contoh "mawar"), nomor rumah (contoh "AA01").
-- [x] Foto profil: pasang foto saat daftar dan di menu Akun (ganti/hapus); foto tampil di Admin (daftar warga, verifikasi, riwayat, chat); bila belum ada foto tampil inisial nama.
+- [x] Foto profil: pasang foto saat daftar dan di menu Akun (ganti/hapus); foto tampil di Admin (daftar warga, verifikasi, kartu verifikasi top-up, riwayat, chat); bila belum ada foto tampil inisial nama. Foto diperkecil otomatis sebelum dikirim (sisi terpanjang 800px, JPEG) supaya foto kamera HP tidak melebihi batas body server (~5MB) — sebelumnya foto besar gagal tersimpan.
+- [x] Foto barang dan gambar chat juga diperkecil otomatis sebelum dikirim (maks 1000px).
 - [x] Verifikasi admin sebelum bisa belanja; penolakan menampilkan alasan admin.
 - [x] 1 nomor HP = 1 akun (nomor yang sudah terdaftar menampilkan "Masuk sebagai ...", tidak membuat akun kedua).
 - [x] Log in pakai nomor HP; log out di tab Akun.
@@ -176,6 +177,8 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 
 ### Saldo dan top-up
 - [x] Top-up via QRIS (gambar atas nama Toko Khayla, NMID ID1022215364889, A01), transfer, atau tunai; admin menyetujui.
+- [x] Bukti pembayaran top-up (opsional, untuk QRIS/transfer; tidak perlu untuk tunai): warga melampirkan foto bukti saat mengajukan (pratinjau, bisa dihapus, diperkecil otomatis maks 1200px); admin melihat thumbnail bukti di kartu verifikasi top-up (ketuk untuk ukuran penuh) dan tautan "Lihat bukti" di riwayat; pengajuan tanpa bukti diberi catatan "Tanpa bukti pembayaran".
+- [x] Perbaikan transaksi Turso 2026-11-08: parameter query di dalam transaksi harus dikirim sebagai objek `{sql, args}` — cara lama `tx.execute(sql, args)` diam-diam membuang argumen di database jarak jauh sehingga persetujuan top-up, pembuatan pesanan, dan pembatalan pesanan tidak pernah tersimpan walau server menjawab 200. Sudah diuji live (top-up Tri wahyu Rp50.000 selesai, saldo bertambah).
 - [x] Halaman saldo menampilkan peringatan persis: "Saldo tokoku tidak dapat di uangkan kembali. Saldo hanya bisa di pakai untuk belanja di tokoku, jadi isi secukupnya sesuai kebutuhan belanja Kamu" (kotak peringatan di bawah angka saldo, di atas formulir top-up).
 - [x] Tidak bisa mengajukan top-up baru sebelum pengajuan lama disetujui (form diganti pemberitahuan; server juga menolak).
 - [x] Penolakan top-up memakai kotak alasan; alasan tampil ke warga.
@@ -184,7 +187,7 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 - [x] Diantar ke rumah (ongkir Rp2.000, bisa diubah admin; gratis kalau ambil di toko) atau ambil di toko.
 - [x] Foto barang tampil di tiap baris barang pada kartu pesanan (Warga "Pesanan saya" dan Pesanan Admin), dari snapshot saat pesanan dibuat — tetap tampil walau barang diubah/dihapus admin; pesanan lama tanpa snapshot tampil tanpa gambar.
 - [x] Wajib pilih jam: 09.00-10.00, 11.00-12.00, 16.00-17.00, 19.00-20.00; jam tampil di kartu pesanan.
-- [x] Bayar pakai saldo (memakai harga spesial bila ada) atau tunai (catatan "Mohon bayar dengan uang pas" di menu bayar dan kartu pesanan).
+- [x] Bayar pakai saldo (memakai harga spesial bila ada) atau tunai (catatan "Mohon bayar dengan uang pas" di menu bayar dan kartu pesanan). Harga spesial tampil di tiap baris barang di keranjang bila bayar pakai saldo (harga normal dicoret + catatan "Harga spesial saldo"), dan baris barang ikut berubah saat cara bayar diganti; ringkasan sudah memakai harga spesial sejak awal.
 - [x] Catatan untuk toko, contoh "cth. Tolong di taruh di kranjang paket".
 - [x] Saklar on/off "Gratis ongkir bila bayar pakai saldo" di pengaturan admin (bawaan mati); keranjang menampilkan "GRATIS (bayar pakai saldo)" bila aktif.
 - [x] Warga bisa membatalkan pesanan Baru (stok dan saldo dikembalikan); tidak bisa membatalkan bila sudah Diproses (server juga menolak). Konfirmasi batal memakai modal buatan sendiri ("Ya, batalkan pesanan" / "Tidak jadi"), bukan dialog bawaan browser — tidak ada lagi `window.confirm` di kode.

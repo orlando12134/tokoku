@@ -177,6 +177,13 @@ async function initDb() {
     await client.execute('ALTER TABLE warga ADD COLUMN photo TEXT NULL');
   } catch { /* kolom photo sudah ada */ }
 
+  // FITUR: Bukti pembayaran top-up (2026-11-08) — migrasi AMAN: tambah
+  // kolom proof (data URL snapshot, nullable) hanya bila belum ada;
+  // pengajuan lama tetap bisa dibaca (proof = null → "Tanpa bukti").
+  try {
+    await client.execute('ALTER TABLE topups ADD COLUMN proof TEXT NULL');
+  } catch { /* kolom proof sudah ada */ }
+
   // FITUR: Settings default — ongkir Rp2.000, gratis ongkir saldo mati, toko buka
   await client.execute(
     'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
@@ -527,15 +534,19 @@ async function handleApi(req, res, pathname, query) {
       });
     }
     const info = await run(
-      "INSERT INTO topups (wargaId, amount, method, status, createdAt) VALUES (?, ?, ?, 'pending', ?)",
-      [wargaId, amount, method, nowIso()]
+      // FITUR: Bukti pembayaran top-up — snapshot data URL (opsional,
+      // sudah diperkecil di sisi warga sebelum dikirim).
+      "INSERT INTO topups (wargaId, amount, method, status, proof, createdAt) VALUES (?, ?, ?, 'pending', ?, ?)",
+      [wargaId, amount, method, b.proof ? String(b.proof) : null, nowIso()]
     );
     const topup = await qOne('SELECT * FROM topups WHERE id = ?', [numId(info.lastInsertRowid)]);
     return sendJson(res, 201, { ok: true, topup });
   }
   if (pathname === '/api/topup/pending' && req.method === 'GET') {
     const rows = await q(
-      "SELECT t.*, w.name AS wargaName, w.phone AS wargaPhone " +
+      // FITUR: Foto profil warga — ikut dikirim supaya Admin melihat foto
+      // warga di kartu verifikasi top-up (null bila belum pasang foto).
+      "SELECT t.*, w.name AS wargaName, w.phone AS wargaPhone, w.photo AS wargaPhoto " +
       'FROM topups t JOIN warga w ON w.id = t.wargaId ' +
       "WHERE t.status = 'pending' ORDER BY t.createdAt ASC, t.id ASC"
     );
