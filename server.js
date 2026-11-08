@@ -62,8 +62,17 @@ async function qOne(sql, args = [], ex = null) {
   return rows[0] || null;
 }
 
+// FITUR: Perbaikan transaksi 2026-11-08 — JANGAN ubah kembali ke
+// ex.execute(sql, args): transaksi jarak jauh (Turso, HranaTransaction)
+// execute()-nya hanya menerima SATU argumen berupa objek {sql, args};
+// argumen args kedua DIAM-DIAM DIBUANG sehingga semua '?' terikat NULL,
+// UPDATE tidak mengenai baris apa pun tanpa error, dan endpoint tetap
+// mengembalikan 200 (top-up live tidak pernah selesai; pesanan/cancel
+// juga rusak). Bentuk {sql, args} juga diterima transaksi lokal
+// (Sqlite3Transaction), jadi satu jalur ini benar di kedua database.
 async function run(sql, args = [], ex = null) {
-  return (ex || client).execute(sql, args);
+  if (ex) return ex.execute({ sql, args });
+  return client.execute(sql, args);
 }
 
 function numId(v) {
