@@ -28,6 +28,15 @@ html, body { margin: 0; padding: 0; }
 .splash-orbit span:nth-child(3) { bottom: 6px; right: 2px; }
 @keyframes splash-spin { to { transform: rotate(360deg); } }
 
+/* FITUR: Foto profil warga — foto bulat; bila belum ada foto, lingkaran
+   hijau berisi inisial nama. */
+.avatar { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; flex: none; background: #dcfce7; }
+.avatar-initials { display: inline-flex; align-items: center; justify-content: center; background: var(--green); color: #fff; font-weight: 800; font-size: 16px; }
+.avatar-lg { width: 72px; height: 72px; font-size: 26px; }
+.avatar-sm { width: 32px; height: 32px; font-size: 13px; }
+.warga-row { display: flex; gap: 10px; align-items: center; }
+.warga-row .warga-info { min-width: 0; }
+
 /* FITUR: Baris barang di kartu pesanan — foto snapshot + nama + jumlah */
 .order-items { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
 .order-item { display: flex; gap: 10px; align-items: center; }
@@ -155,6 +164,9 @@ small, .muted { color: var(--muted); }
 .chat-input-row input[type="text"] { flex: 1; }
 .img-preview { margin: 8px 0; }
 .img-preview img { max-height: 160px; border-radius: 10px; }
+/* FITUR: Bukti pembayaran — thumbnail di kartu verifikasi top-up. */
+.proof-thumb { margin: 8px 0; }
+.proof-thumb img { max-width: 140px; max-height: 140px; border-radius: 10px; border: 1px solid var(--line); cursor: zoom-in; object-fit: cover; }
 .qris-img { max-width: 260px; margin: 8px auto; border: 1px solid var(--line); border-radius: 12px; }
 
 /* Saklar (switch) */
@@ -175,6 +187,10 @@ small, .muted { color: var(--muted); }
   max-width: calc(100% - 32px); z-index: 90; box-shadow: 0 6px 24px rgba(0,0,0,.3);
 }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: flex-end; justify-content: center; z-index: 80; }
+/* FITUR: Modal konfirmasi buatan sendiri — overlay terang hijau lembut
+   (bukan layar gelap seperti dialog bawaan browser). */
+.modal-overlay.modal-confirm { background: rgba(22,101,52,.28); }
+.modal-overlay.modal-confirm .modal { border-top: 4px solid var(--green); }
 .modal { background: #fff; width: min(520px, 100%); max-height: 82vh; overflow: auto; border-radius: 16px 16px 0 0; padding: 18px 16px calc(18px + env(safe-area-inset-bottom, 0px)); }
 .modal-close { width: 100%; margin-top: 14px; }
 .list-item { border-top: 1px solid var(--line); padding: 10px 0; }

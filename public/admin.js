@@ -16,6 +16,9 @@ var productEditId = null;
 var adminChatWargaId = null;
 var adminOrderFilter = { date: '', slot: '' };
 var lastAdminChatKey = '';
+// FITUR: Bukti pembayaran top-up — peta id top-up -> data URL bukti,
+// diisi saat daftar top-up / riwayat dimuat; dipakai showTopupProof().
+var lastTopupProofs = {};
 // FITUR: Live update tanpa refresh — polling 10 detik, snapshot terakhir
 // tiap tab; tampilan hanya diperbarui bila data benar-benar berubah.
 var liveTimer = null;
@@ -73,6 +76,18 @@ function startLivePoll() {
 }
 async function pollLive() {
   try {
+    // FITUR: Status toko live — poll /api/settings di SEMUA tab; bila
+    // berubah, perbarui teks header tanpa refresh (dan saklar di Beranda
+    // ikut diperbarui lewat kunci home di bawah, yang memakai settings
+    // segar ini — sebelumnya kunci memakai settings basi dari render()).
+    var ssLive = await api('/settings');
+    var ssKey = JSON.stringify(ssLive);
+    if (ssKey !== lastLive.settings) {
+      settings = ssLive;
+      lastLive.settings = ssKey;
+      var ssEl = $('storeStatus');
+      if (ssEl) { ssEl.textContent = isStoreOpen() ? 'Toko Buka' : 'Toko Tutup'; ssEl.classList.toggle('closed', !isStoreOpen()); }
+    }
     var threads = await api('/chat/threads');
     var un = 0;
     (threads || []).forEach(function (t) { un += Number(t.unreadAdmin) || 0; });
@@ -213,9 +228,11 @@ function renderAdminProducts(view) {
 }
 function onProductImageChange(input) {
   var f = input.files && input.files[0]; if (!f) return;
-  var r = new FileReader();
-  r.onload = function () { pendingProductImage = r.result; var pv = $('prodPreview'); if (pv) pv.innerHTML = '<img src="' + esc(pendingProductImage) + '" alt="Pratinjau foto barang">'; };
-  r.readAsDataURL(f);
+  // FITUR: Foto diperkecil sebelum dikirim — lihat readImageFile.
+  readImageFile(f, 1000, 0.85, function (dataUrl) {
+    if (!dataUrl) return;
+    pendingProductImage = dataUrl; var pv = $('prodPreview'); if (pv) pv.innerHTML = '<img src="' + esc(pendingProductImage) + '" alt="Pratinjau foto barang">';
+  });
 }
 function editProduct(id) { productEditId = id; pendingProductImage = null; render(); }
 async function toggleProductVisible(id, visible) {
@@ -284,8 +301,10 @@ async function renderAdminWarga(view) {
   lastLive.warga = JSON.stringify(list);
   view.innerHTML = '<h1>Warga</h1>' + (list.length ? list.map(function (w) {
     var st = w.status || '';
-    return '<div class="card"><b>' + esc(w.name) + '</b> <span class="status-pill">' + esc(st) + '</span>' +
-      '<p class="muted">' + esc(w.phone) + ' · Blok ' + esc(w.blok) + ' No. ' + esc(w.houseNo) + (rejectReason(w) ? '<br>Alasan ditolak: ' + esc(rejectReason(w)) : '') + '</p>' +
+    // FITUR: Foto profil warga — foto di daftar warga (termasuk yang
+    // menunggu verifikasi); inisial bila warga belum pasang foto.
+    return '<div class="card"><div class="warga-row">' + avatarHtml(w, 'avatar-sm') + '<div class="warga-info"><b>' + esc(w.name) + '</b> <span class="status-pill">' + esc(st) + '</span>' +
+      '<p class="muted">' + esc(w.phone) + ' · Blok ' + esc(w.blok) + ' No. ' + esc(w.houseNo) + (rejectReason(w) ? '<br>Alasan ditolak: ' + esc(rejectReason(w)) : '') + '</p></div></div>' +
       '<div class="row">' +
       (isPending(w) ? '<button type="button" class="btn btn-small" onclick="approveWarga(' + w.id + ')">Setujui</button>' +
         '<button type="button" class="btn btn-danger btn-small" onclick="rejectWarga(' + w.id + ')">Tolak</button>' : '') +
@@ -309,24 +328,39 @@ async function showWargaHistory(id) {
     var w = h.warga || {};
     var orders = h.orders || [], topups = h.topups || [];
     openModal('<h2>Riwayat — ' + esc(w.name || ('Warga #' + id)) + '</h2>' +
+      // FITUR: Foto profil warga — foto (atau inisial) di riwayat warga.
+      '<div class="warga-row">' + avatarHtml(w, 'avatar-lg') + '<div class="warga-info">' + esc(w.phone || '') + '<br>Blok ' + esc(w.blok || '') + ' No. ' + esc(w.houseNo || '') + '<br>Saldo: <b>' + fmtRp(w.balance || 0) + '</b></div></div>' +
       '<p><b>Total belanja: ' + fmtRp(h.totalSpent) + '</b></p>' +
       '<h3>Pesanan (' + orders.length + ')</h3>' + (orders.length ? orders.map(function (o) { return '<div class="list-item">' + fmtDate(o.createdAt || o.date) + ' · ' + esc(orderStatusLabel(o.status)) + ' · <b>' + fmtRp(o.total) + '</b></div>'; }).join('') : '<p class="muted">Belum ada pesanan.</p>') +
-      '<h3>Top-up (' + topups.length + ')</h3>' + (topups.length ? topups.map(function (t) { return '<div class="list-item">' + fmtDate(t.createdAt) + ' · ' + fmtRp(t.amount) + ' · ' + esc(t.method || '') + ' · ' + esc(t.status || '') + '</div>'; }).join('') : '<p class="muted">Belum ada top-up.</p>'));
+      '<h3>Top-up (' + topups.length + ')</h3>' + (topups.length ? topups.map(function (t) {
+        // FITUR: Bukti pembayaran — tautan "Lihat bukti" bila ada.
+        if (t.proof) lastTopupProofs[t.id] = t.proof;
+        return '<div class="list-item">' + fmtDate(t.createdAt) + ' · ' + fmtRp(t.amount) + ' · ' + esc(t.method || '') + ' · ' + esc(t.status || '') + (t.proof ? ' · <button type="button" class="linklike" onclick="showTopupProof(' + t.id + ')">Lihat bukti</button>' : '') + '</div>';
+      }).join('') : '<p class="muted">Belum ada top-up.</p>'));
   } catch (err) { toast('Gagal memuat riwayat: ' + err.message, false); }
 }
 
 // FITUR: Top-up admin — setujui/tolak pengajuan menunggu (penolakan pakai alasan)
+// FITUR: Foto profil warga di kartu verifikasi + bukti pembayaran (2026-11-08)
 async function renderAdminTopup(view) {
   var list = [];
   try { list = await api('/topup/pending'); } catch (e) { toast('Gagal memuat top-up: ' + e.message, false); }
   if (!Array.isArray(list)) list = [];
   lastLive.topups = JSON.stringify(list);
   view.innerHTML = '<h1>Top-up Menunggu</h1>' + (list.length ? list.map(function (t) {
-    return '<div class="card"><b>' + fmtRp(t.amount) + '</b> <span class="status-pill">' + esc(t.method || '') + '</span>' +
-      '<p class="muted">' + esc(t.wargaName || t.name || ('Warga #' + t.wargaId)) + ' · ' + fmtDate(t.createdAt) + '</p>' +
+    if (t.proof) lastTopupProofs[t.id] = t.proof;
+    return '<div class="card"><div class="warga-row">' + avatarHtml({ name: t.wargaName, photo: t.wargaPhoto }, 'avatar-sm') + '<div class="warga-info"><b>' + fmtRp(t.amount) + '</b> <span class="status-pill">' + esc(t.method || '') + '</span>' +
+      '<p class="muted">' + esc(t.wargaName || t.name || ('Warga #' + t.wargaId)) + ' · ' + fmtDate(t.createdAt) + '</p></div></div>' +
+      (t.proof ? '<div class="proof-thumb"><img src="' + esc(t.proof) + '" alt="Bukti pembayaran" onclick="showTopupProof(' + t.id + ')"></div><p class="muted">Ketuk gambar untuk ukuran penuh.</p>' : '<p class="muted">Tanpa bukti pembayaran.</p>') +
       '<div class="row"><button type="button" class="btn btn-small" onclick="approveTopup(' + t.id + ')">Setujui</button>' +
       '<button type="button" class="btn btn-danger btn-small" onclick="rejectTopup(' + t.id + ')">Tolak</button></div></div>';
   }).join('') : '<div class="card"><p>Tidak ada pengajuan top-up yang menunggu.</p></div>');
+}
+// FITUR: Bukti pembayaran — tampilkan gambar bukti ukuran penuh di modal.
+function showTopupProof(id) {
+  var proof = lastTopupProofs[id];
+  if (!proof) { toast('Bukti pembayaran tidak ditemukan.', false); return; }
+  openModal('<h2>Bukti pembayaran</h2><img src="' + esc(proof) + '" alt="Bukti pembayaran" style="max-width:100%;border-radius:8px">');
 }
 async function approveTopup(id) {
   try { await api('/topup/' + id + '/approve', { method: 'POST', body: {} }); toast('Top-up disetujui, saldo warga bertambah.'); render(); }
@@ -350,9 +384,10 @@ async function renderAdminChat(view) {
     // PERBAIKAN: lastMessage dari API berupa objek {text,image,...}, bukan string.
     var lm = t.lastMessage;
     var preview = !lm ? '' : (lm.text ? lm.text : (lm.image ? '📷 Gambar' : ''));
-    return '<div class="card" style="cursor:pointer" onclick="adminChatWargaId=' + t.wargaId + ';render()"><div class="row-between"><b>' + esc(t.wargaName || ('Warga #' + t.wargaId)) + '</b>' +
+    // FITUR: Foto profil warga — foto (atau inisial) di daftar chat admin.
+    return '<div class="card" style="cursor:pointer" onclick="adminChatWargaId=' + t.wargaId + ';render()"><div class="warga-row">' + avatarHtml({ name: t.wargaName, photo: t.wargaPhoto }, 'avatar-sm') + '<div class="warga-info"><div class="row-between"><b>' + esc(t.wargaName || ('Warga #' + t.wargaId)) + '</b>' +
       (Number(t.unreadAdmin) > 0 ? '<span class="badge-inline">' + t.unreadAdmin + '</span>' : '') + '</div>' +
-      '<p class="muted">' + esc(preview) + '</p></div>';
+      '<p class="muted">' + esc(preview) + '</p></div></div></div>';
   }).join('') : '<div class="card"><p>Belum ada percakapan.</p></div>');
 }
 async function renderAdminChatThread(view, wargaId) {
@@ -361,9 +396,10 @@ async function renderAdminChatThread(view, wargaId) {
   var msgs = data.messages || [];
   lastAdminChatKey = msgs.map(function (m) { return m.id; }).join(',');
   var name = '';
-  try { var threads = await api('/chat/threads'); var th = (threads || []).find(function (t) { return String(t.wargaId) === String(wargaId); }); if (th) name = th.wargaName || ''; } catch (e) {}
+  var threadPhoto = null;
+  try { var threads = await api('/chat/threads'); var th = (threads || []).find(function (t) { return String(t.wargaId) === String(wargaId); }); if (th) { name = th.wargaName || ''; threadPhoto = th.wargaPhoto || null; } } catch (e) {}
   view.innerHTML = '<button type="button" class="btn btn-secondary btn-small" onclick="adminChatWargaId=null;render()">← Semua chat</button>' +
-    '<h1>Chat — ' + esc(name || ('Warga #' + wargaId)) + '</h1><div class="card"><div class="chat-box" id="chatBox">' +
+    '<div class="warga-row" style="margin:10px 0">' + avatarHtml({ name: name, photo: threadPhoto }, 'avatar-sm') + '<h1 style="margin:0">Chat — ' + esc(name || ('Warga #' + wargaId)) + '</h1></div><div class="card"><div class="chat-box" id="chatBox">' +
     (msgs.length ? chatBubblesHtml(msgs, 'admin') : '<p class="muted">Belum ada pesan.</p>') + '</div>' +
     '<div id="chatPreview" class="img-preview"></div>' +
     '<div class="chat-input-row"><label class="btn btn-secondary btn-small" style="padding:9px 12px">📎<input type="file" accept="image/*" hidden onchange="onChatImageChange(this)"></label>' +

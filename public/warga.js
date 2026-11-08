@@ -20,6 +20,13 @@ var liveTimer = null;
 var lastLive = { orders: '', balance: null, topupPending: null, warga: '', products: '', settings: '', unread: null };
 var detailProductId = null;
 var detailQty = 1;
+// FITUR: Foto profil warga — foto yang dipilih saat daftar / di Akun,
+// dikirim sebagai snapshot data URL (seperti foto barang/chat).
+var pendingRegPhoto = null;
+var pendingAccountPhoto = null;
+// FITUR: Bukti pembayaran top-up — foto bukti yang dipilih di form
+// top-up (opsional), dikirim bersama pengajuan.
+var pendingTopupProof = null;
 
 try {
   warga = JSON.parse(localStorage.getItem('tokoku_warga') || 'null');
@@ -87,12 +94,31 @@ async function pollLive() {
     var c = await api('/chat/' + warga.id);
     var un = (c && c.unreadWarga) || 0;
     if (un !== lastLive.unread) { unreadWarga = un; lastLive.unread = un; renderNav(); }
+    // FITUR: Status toko live — poll /api/settings di SEMUA tab (bukan
+    // hanya Belanja); bila berubah, perbarui teks header + etalase /
+    // keranjang tanpa refresh.
+    var ssLive = await api('/settings');
+    var ssKey = JSON.stringify(ssLive);
+    if (ssKey !== lastLive.settings) {
+      var wasOpen = isStoreOpen();
+      settings = ssLive;
+      lastLive.settings = ssKey;
+      var ssEl = $('storeStatus');
+      if (ssEl) { ssEl.textContent = isStoreOpen() ? 'Toko Buka' : 'Toko Tutup'; ssEl.classList.toggle('closed', !isStoreOpen()); }
+      if (isStoreOpen() !== wasOpen) {
+        if (wargaTab === 'belanja') {
+          await preserveScroll(function () { renderShop($('view')); updateCartBar(); });
+        } else if (wargaTab === 'keranjang') {
+          if (!viewHasFormFocus()) await preserveScroll(function () { renderCartView($('view')); });
+        }
+        updateCartBar();
+      }
+    }
     if (wargaTab === 'belanja') {
       var ps = await api('/products');
-      var ss = await api('/settings');
-      if (JSON.stringify(ps) !== lastLive.products || JSON.stringify(ss) !== lastLive.settings) {
-        products = ps; settings = ss; await preserveScroll(function () { renderShop($('view')); updateCartBar(); });
-        lastLive.products = JSON.stringify(ps); lastLive.settings = JSON.stringify(ss);
+      if (JSON.stringify(ps) !== lastLive.products) {
+        products = ps; await preserveScroll(function () { renderShop($('view')); updateCartBar(); });
+        lastLive.products = JSON.stringify(ps);
       }
     } else if (wargaTab === 'pesanan') {
       var orders = await api('/warga/' + warga.id + '/orders');
@@ -190,6 +216,8 @@ function renderAuth(view) {
       '<label>Nomor HP</label><input id="regPhone" required inputmode="tel" placeholder="cth. 0812xxxxxxx">' +
       '<label>Blok</label><input id="regBlok" required placeholder="mawar">' +
       '<label>Nomor rumah</label><input id="regHouse" required placeholder="AA01">' +
+      '<label>Foto profil (opsional)</label><input type="file" accept="image/*" onchange="onRegPhotoChange(this)">' +
+      '<div id="regPhotoPreview" class="img-preview"></div>' +
       '<button type="submit" class="btn btn-block">Kirim Pendaftaran</button></form>' +
       '<p style="text-align:center"><button type="button" class="linklike" onclick="authView=\'login\';render()">Sudah terdaftar? Log In</button></p></div>';
   } else {
@@ -219,7 +247,7 @@ async function doLogin(e) {
 
 async function doRegister(e) {
   e.preventDefault();
-  var body = { name: $('regName').value.trim(), phone: $('regPhone').value.trim(), blok: $('regBlok').value.trim(), houseNo: $('regHouse').value.trim() };
+  var body = { name: $('regName').value.trim(), phone: $('regPhone').value.trim(), blok: $('regBlok').value.trim(), houseNo: $('regHouse').value.trim(), photo: pendingRegPhoto || undefined };
   if (!body.name || !body.phone || !body.blok || !body.houseNo) { toast('Lengkapi semua data pendaftaran.', false); return; }
   try {
     var r = await api('/register', { method: 'POST', body: body });
@@ -230,9 +258,44 @@ async function doRegister(e) {
       render(); return;
     }
     warga = r.warga || body; saveLocal();
+    pendingRegPhoto = null;
     toast('Pendaftaran terkirim. Menunggu verifikasi admin.');
     render();
   } catch (err) { toast('Gagal mendaftar: ' + err.message, false); }
+}
+
+// FITUR: Foto profil warga — pilih foto saat daftar (pratinjau) / di Akun.
+// FITUR: Foto diperkecil sebelum dikirim (max 800px) — lihat readImageFile.
+function onRegPhotoChange(input) {
+  var f = input.files && input.files[0]; if (!f) return;
+  readImageFile(f, 800, 0.82, function (dataUrl) {
+    if (!dataUrl) return;
+    pendingRegPhoto = dataUrl; var pv = $('regPhotoPreview'); if (pv) pv.innerHTML = '<img src="' + esc(pendingRegPhoto) + '" alt="Pratinjau foto profil">';
+  });
+}
+function onAccountPhotoChange(input) {
+  var f = input.files && input.files[0]; if (!f) return;
+  readImageFile(f, 800, 0.82, function (dataUrl) {
+    if (!dataUrl) return;
+    pendingAccountPhoto = dataUrl; var pv = $('accountPhotoPreview'); if (pv) pv.innerHTML = '<img src="' + esc(pendingAccountPhoto) + '" alt="Pratinjau foto profil">';
+  });
+}
+async function saveProfilePhoto() {
+  if (!pendingAccountPhoto) { toast('Pilih foto dulu.', false); return; }
+  try {
+    var r = await api('/warga/' + warga.id + '/profile', { method: 'PUT', body: { photo: pendingAccountPhoto } });
+    warga = r; saveLocal(); pendingAccountPhoto = null;
+    toast('Foto profil tersimpan.');
+    render();
+  } catch (err) { toast('Gagal menyimpan foto: ' + err.message, false); }
+}
+async function removeProfilePhoto() {
+  try {
+    var r = await api('/warga/' + warga.id + '/profile', { method: 'PUT', body: { photo: null } });
+    warga = r; saveLocal(); pendingAccountPhoto = null;
+    toast('Foto profil dihapus.');
+    render();
+  } catch (err) { toast('Gagal menghapus foto: ' + err.message, false); }
 }
 
 function logout() { warga = null; cart = []; saveLocal(); authView = 'login'; wargaTab = 'belanja'; render(); toast('Kamu sudah keluar.'); }
@@ -342,16 +405,28 @@ function updateCartBar() {
 }
 
 // FITUR: Keranjang — antar/ambil + slot jam + catatan + saldo/tunai + ongkir
-function renderCartView(view) {
-  if (!isStoreOpen()) { view.innerHTML = '<div class="card"><h1>Maaf, tokoku sedang tutup</h1><p>Pemesanan tidak tersedia saat toko tutup.</p></div>'; return; }
-  var lines = cartLines('tunai');
-  if (!lines.length) { view.innerHTML = '<div class="card"><h1>Keranjang</h1><p>Keranjangmu masih kosong. Yuk belanja dulu.</p><button type="button" class="btn btn-block" onclick="setTab(\'belanja\')">Ke Belanja</button></div>'; return; }
-  var itemsHtml = lines.map(function (l) {
-    return '<div class="list-item row-between"><div><b>' + esc(l.p.name) + '</b><br><span class="muted">' + fmtRp(l.price) + ' × ' + l.qty + '</span></div>' +
+// FITUR: Harga spesial saldo di keranjang (2026-11-08) — baris barang
+// memakai harga sesuai cara bayar yang dipilih: bila bayar pakai saldo dan
+// barang punya harga spesial, tampil harga spesial (harga normal dicoret)
+// + catatan "Harga spesial saldo". Sebelumnya baris barang selalu memakai
+// harga normal walau total ringkasan sudah memakai harga spesial.
+function cartItemsHtml(payment) {
+  var lines = cartLines(payment);
+  return lines.map(function (l) {
+    var hasSpecial = payment === 'saldo' && l.p.specialPrice != null && Number(l.p.specialPrice) > 0;
+    var priceTxt = hasSpecial
+      ? '<s class="muted">' + fmtRp(l.p.price) + '</s> ' + fmtRp(l.price)
+      : fmtRp(l.price);
+    var note = hasSpecial ? '<br><span class="product-special">Harga spesial saldo (normal ' + fmtRp(l.p.price) + ')</span>' : '';
+    return '<div class="list-item row-between"><div><b>' + esc(l.p.name) + '</b><br><span class="muted">' + priceTxt + ' × ' + l.qty + '</span>' + note + '</div>' +
       '<div class="row"><button type="button" class="btn btn-secondary btn-small" onclick="changeQty(' + JSON.stringify(l.p.id) + ',-1)">−</button><b>' + l.qty + '</b>' +
       '<button type="button" class="btn btn-secondary btn-small" onclick="changeQty(' + JSON.stringify(l.p.id) + ',1)">+</button></div></div>';
   }).join('');
-  view.innerHTML = '<div class="card"><h1>Keranjang</h1>' + itemsHtml + '</div>' +
+}
+function renderCartView(view) {
+  if (!isStoreOpen()) { view.innerHTML = '<div class="card"><h1>Maaf, tokoku sedang tutup</h1><p>Pemesanan tidak tersedia saat toko tutup.</p></div>'; return; }
+  if (!cart.length || !cartLines('tunai').length) { view.innerHTML = '<div class="card"><h1>Keranjang</h1><p>Keranjangmu masih kosong. Yuk belanja dulu.</p><button type="button" class="btn btn-block" onclick="setTab(\'belanja\')">Ke Belanja</button></div>'; return; }
+  view.innerHTML = '<div class="card"><h1>Keranjang</h1><div id="cartItems"></div></div>' +
     '<div class="card"><h2>Pengiriman</h2>' +
     '<label><input type="radio" name="method" value="antar" checked style="width:auto"> Diantar ke rumah</label>' +
     '<label><input type="radio" name="method" value="ambil" style="width:auto"> Ambil di toko (gratis)</label>' +
@@ -363,10 +438,12 @@ function renderCartView(view) {
     '<div id="tunaiNote" class="notice" hidden>Mohon bayar dengan uang pas</div>' +
     '<div id="cartSummary"></div>' +
     '<button type="button" class="btn btn-block" onclick="submitOrder()">Pesan Sekarang</button></div>';
-  // Perbarui ringkasan + catatan tunai sesuai pilihan saat ini
+  // Perbarui baris barang + ringkasan + catatan tunai sesuai pilihan saat ini
   var upd = function () {
     var method = (document.querySelector('input[name="method"]:checked') || {}).value || 'antar';
     var payment = (document.querySelector('input[name="payment"]:checked') || {}).value || 'saldo';
+    var itemsEl = $('cartItems');
+    if (itemsEl) itemsEl.innerHTML = cartItemsHtml(payment);
     var ls = cartLines(payment);
     var sub = ls.reduce(function (a, l) { return a + l.sub; }, 0);
     var fee = deliveryFeeFor(method, payment);
@@ -422,13 +499,22 @@ async function renderWargaOrders(view) {
   });
   view.innerHTML = html;
 }
+// FITUR: Batalkan pesanan — modal konfirmasi buatan sendiri (openConfirmModal),
+// bukan confirm() bawaan browser (layar gelap + "tokoku-a642.onrender.com menyatakan").
 async function cancelOrder(orderId) {
-  if (!confirm('Batalkan pesanan ini? Stok dikembalikan dan saldo (bila dibayar pakai saldo) dikembalikan.')) return;
-  try {
-    await api('/orders/' + orderId + '/cancel', { method: 'POST', body: { wargaId: warga.id } });
-    toast('Pesanan dibatalkan.');
-    render();
-  } catch (err) { toast('Gagal membatalkan: ' + err.message, false); }
+  openConfirmModal({
+    title: 'Batalkan pesanan?',
+    message: 'Stok dikembalikan dan saldo (bila dibayar pakai saldo) dikembalikan.',
+    confirmText: 'Ya, batalkan pesanan',
+    cancelText: 'Tidak jadi',
+    onConfirm: async function () {
+      try {
+        await api('/orders/' + orderId + '/cancel', { method: 'POST', body: { wargaId: warga.id } });
+        toast('Pesanan dibatalkan.');
+        render();
+      } catch (err) { toast('Gagal membatalkan: ' + err.message, false); }
+    }
+  });
 }
 
 // FITUR: Saldo — peringatan tidak bisa diuangkan, QRIS, form top-up / pengajuan menunggu
@@ -449,10 +535,26 @@ async function renderSaldo(view) {
   } else {
     html += '<div class="card"><h2>Isi saldo</h2><form onsubmit="submitTopup(event)">' +
       '<label>Nominal (Rp)</label><input id="topupAmount" type="number" min="1000" step="1000" required placeholder="cth. 50000">' +
-      '<label>Metode</label><select id="topupMethod"><option value="qris">QRIS</option><option value="transfer">Transfer</option><option value="tunai">Tunai</option></select>' +
+      '<label>Metode</label><select id="topupMethod" onchange="toggleTopupProof(this.value)"><option value="qris">QRIS</option><option value="transfer">Transfer</option><option value="tunai">Tunai</option></select>' +
+      // FITUR: Bukti pembayaran top-up — lampirkan foto bukti transfer /
+      // struk (opsional) supaya verifikasi admin lebih cepat; tidak
+      // diperlukan bila bayar tunai di toko. Foto diperkecil otomatis.
+      '<div id="topupProofWrap"><label>Bukti pembayaran (opsional)</label><input type="file" accept="image/*" onchange="onTopupProofChange(this)">' +
+      '<div id="topupProofPreview" class="img-preview"></div></div>' +
       '<button type="submit" class="btn btn-block">Ajukan top-up</button></form></div>';
   }
   view.innerHTML = html;
+}
+function toggleTopupProof(method) {
+  var w = $('topupProofWrap'); if (w) w.style.display = method === 'tunai' ? 'none' : '';
+  if (method === 'tunai') { pendingTopupProof = null; var pv = $('topupProofPreview'); if (pv) pv.innerHTML = ''; }
+}
+function onTopupProofChange(input) {
+  var f = input.files && input.files[0]; if (!f) return;
+  readImageFile(f, 1200, 0.85, function (dataUrl) {
+    if (!dataUrl) return;
+    pendingTopupProof = dataUrl; var pv = $('topupProofPreview'); if (pv) pv.innerHTML = '<img src="' + esc(pendingTopupProof) + '" alt="Pratinjau bukti pembayaran"><br><button type="button" class="btn btn-secondary btn-small" onclick="pendingTopupProof=null;document.getElementById(\'topupProofPreview\').innerHTML=\'\'">Hapus bukti</button>';
+  });
 }
 async function submitTopup(e) {
   e.preventDefault();
@@ -460,7 +562,8 @@ async function submitTopup(e) {
   var method = ($('topupMethod') || {}).value || 'qris';
   if (amount <= 0) { toast('Masukkan nominal top-up yang benar.', false); return; }
   try {
-    await api('/topup', { method: 'POST', body: { wargaId: warga.id, amount: amount, method: method } });
+    await api('/topup', { method: 'POST', body: { wargaId: warga.id, amount: amount, method: method, proof: pendingTopupProof || undefined } });
+    pendingTopupProof = null;
     toast('Pengajuan top-up terkirim. Menunggu persetujuan admin.');
     render();
   } catch (err) { toast('Gagal mengajukan top-up: ' + err.message, false); }
@@ -486,8 +589,14 @@ async function renderWargaChat(view) {
 async function sendWargaChat() { await sendChat('warga', warga.id); }
 
 function renderAccount(view) {
+  // FITUR: Foto profil warga — foto besar di Akun (atau inisial bila belum
+  // pasang foto); ganti/hapus foto dari sini, tersimpan ke server.
   view.innerHTML = '<h1>Akun Saya</h1><div class="card">' +
-    '<p><b>' + esc(warga.name) + '</b><br>' + esc(warga.phone) + '<br>Blok ' + esc(warga.blok) + ' No. ' + esc(warga.houseNo) + '<br>Status: ' + esc(warga.status || 'terverifikasi') + '</p>' +
+    '<div class="warga-row">' + avatarHtml(warga, 'avatar-lg') + '<div class="warga-info"><b>' + esc(warga.name) + '</b><br>' + esc(warga.phone) + '<br>Blok ' + esc(warga.blok) + ' No. ' + esc(warga.houseNo) + '<br>Status: ' + esc(warga.status || 'terverifikasi') + '</div></div>' +
+    '<label>Foto profil</label><input type="file" accept="image/*" onchange="onAccountPhotoChange(this)">' +
+    '<div id="accountPhotoPreview" class="img-preview"></div>' +
+    '<div class="row"><button type="button" class="btn btn-small" onclick="saveProfilePhoto()">Simpan foto profil</button>' +
+    (warga.photo ? '<button type="button" class="btn btn-secondary btn-small" onclick="removeProfilePhoto()">Hapus foto</button>' : '') + '</div>' +
     '<button type="button" class="btn btn-secondary btn-block" onclick="logout()">Log Out</button></div>';
 }
 
