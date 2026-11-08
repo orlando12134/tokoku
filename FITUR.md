@@ -208,6 +208,7 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 - [x] Live update tanpa refresh (polling 10 detik, hanya bila data berubah, scroll dijaga): pesanan/top-up/verifikasi/chat di Admin; status pesanan, status top-up, saldo, dan chat di Warga; status buka/tutup toko di kedua aplikasi.
 - [x] Modal konfirmasi buatan sendiri (`openConfirmModal()` di `common.js`, overlay hijau lembut) menggantikan semua `confirm()` bawaan browser.
 - [x] Klik gambar/nama produk di katalog Belanja membuka detail produk (foto besar, harga normal + harga spesial saldo, stok, kategori) dengan pilihan jumlah dan tombol "Tambah ke keranjang"; tombol +/- cepat di kartu tetap berfungsi.
+- [x] Menu kategori di Belanja warga: baris chip di atas grid produk — "Semua" plus satu chip per kategori dari barang yang tampil, masing-masing dengan jumlah barangnya; kategori diambil otomatis dari data (kategori baru muncul sendiri, kategori yang barangnya sudah tidak ada hilang sendiri), barang tanpa kategori masuk "Lainnya", kategori barang tersembunyi tidak muncul. Ketuk chip untuk memfilter; pilihan kategori dan isi keranjang tetap saat ganti kategori maupun buka/tutup detail produk; chip bisa digeser horizontal di layar HP.
 
 ## Batasan yang diketahui
 - Aplikasi Admin dibuka lewat URL `/admin` tanpa kata sandi — siapa pun

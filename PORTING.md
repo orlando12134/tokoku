@@ -156,3 +156,26 @@ Port dari versi Muse (v14) ke publik, setelah perbaikan transaksi Turso
 - Pencarian barang di katalog warga.
 - Notifikasi di luar aplikasi (mis. WhatsApp) saat pesanan/top-up masuk.
 - Ekspor laporan (pesanan/penjualan) ke spreadsheet.
+
+## Perbaikan 2026-11-08 siang (menu kategori di Belanja warga)
+
+Port dari versi Muse (v15) ke publik. Hanya `public/warga.js` (state
+`shopCategory`, `renderShop` + `setShopCategory`) dan `public/style.css`
+(`.cat-row`, `.cat-chip`); server.js tidak berubah.
+
+- **Menu kategori:** chip "Semua (N)" + satu chip per kategori dari barang
+  yang tampil + jumlahnya; barang tanpa kategori masuk "Lainnya"; kategori
+  barang tersembunyi tidak muncul; bila kategori yang dipilih kehabisan
+  barang (Admin menyembunyikan semuanya) pilihan kembali ke "Semua".
+  Filter dan keranjang dipertahankan saat polling maupun buka/tutup detail.
+- **Jebakan yang ditemukan saat uji lokal:** `JSON.stringify` untuk nama
+  kategori di `onclick="..."` menghasilkan tanda petik ganda yang memutus
+  atribut HTML sehingga chip tidak berfungsi sama sekali — diperbaiki
+  dengan `jsQuote()` (petik tunggal + escape). Uji browser pertama
+  menangkap ini (filter tidak berubah walau chip tampil benar).
+- **Uji lokal sebelum deploy:** browser HP 19 pemeriksaan lolos (chip +
+  hitungan benar, filter Mie instan/Sabun mandi/Lainnya, keranjang tetap
+  saat ganti kategori dan buka/tutup detail, pesanan ujung ke ujung
+  saldo 100.000 → 94.700). Regresi API tidak dijalankan ulang untuk
+  perubahan ini karena server.js tidak berubah; alur pesan diuji lewat
+  browser di atas.
