@@ -179,3 +179,28 @@ Port dari versi Muse (v15) ke publik. Hanya `public/warga.js` (state
   saldo 100.000 → 94.700). Regresi API tidak dijalankan ulang untuk
   perubahan ini karena server.js tidak berubah; alur pesan diuji lewat
   browser di atas.
+
+## Perbaikan 2026-11-08 sore (pintasan layar utama / PWA berlogo tokoku)
+
+Port dari versi Muse (v16) ke publik. Yang berubah: `public/manifest.webmanifest`
+(nama "tokoku", display standalone, theme #166534, ikon 192/512/maskable),
+ikon baru dari logo (`public/icon-192.png`, `icon-512.png`,
+`icon-maskable-512.png`, `apple-touch-icon.png` — dibuat dari `logo.png`
+dengan PIL: potong tepi putih, pasang di tengah kanvas persegi putih,
+tidak dipotong/di-stretch; maskable diberi padding lebih besar supaya logo
+tetap di zona aman), `public/sw.js` (service worker TANPA cache: install
+skipWaiting, activate hapus semua cache, fetch tidak dicegat — JANGAN
+tambah caching tanpa persetujuan, supaya update tidak basi),
+`public/warga.html` + `public/admin.html` (link manifest, favicon,
+apple-touch-icon, meta theme-color), `public/common.js` (pendaftaran SW
+bersifat menjaga: cek HEAD /sw.js dulu, gagal diam-diam bila tidak ada),
+dan `server.js` (MIME `.webmanifest` → application/manifest+json).
+
+- **Catatan platform:** di versi Muse, service worker TIDAK bisa tersaji
+  (pipeline hanya mengizinkan satu berkas JS di bundel) — manifest + ikon
+  tetap jalan di sana, tapi prompt "Install aplikasi" penuh hanya ada di
+  versi publik yang menyajikan sw.js dari root.
+- **Uji lokal sebelum deploy:** browser HP 15 pemeriksaan lolos (manifest
+  valid + content-type benar, semua ikon + sw.js 200, SW terdaftar &
+  aktif, tag PWA di Warga dan Admin, plus regresi kategori + pesanan
+  ujung ke ujung saldo 100.000 → 94.700).

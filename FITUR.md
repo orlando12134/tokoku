@@ -209,6 +209,7 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 - [x] Modal konfirmasi buatan sendiri (`openConfirmModal()` di `common.js`, overlay hijau lembut) menggantikan semua `confirm()` bawaan browser.
 - [x] Klik gambar/nama produk di katalog Belanja membuka detail produk (foto besar, harga normal + harga spesial saldo, stok, kategori) dengan pilihan jumlah dan tombol "Tambah ke keranjang"; tombol +/- cepat di kartu tetap berfungsi.
 - [x] Menu kategori di Belanja warga: baris chip di atas grid produk — "Semua" plus satu chip per kategori dari barang yang tampil, masing-masing dengan jumlah barangnya; kategori diambil otomatis dari data (kategori baru muncul sendiri, kategori yang barangnya sudah tidak ada hilang sendiri), barang tanpa kategori masuk "Lainnya", kategori barang tersembunyi tidak muncul. Ketuk chip untuk memfilter; pilihan kategori dan isi keranjang tetap saat ganti kategori maupun buka/tutup detail produk; chip bisa digeser horizontal di layar HP.
+- [x] Pintasan layar utama (PWA) berlogo tokoku: manifest (`manifest.webmanifest`, nama "tokoku", display standalone, warna tema hijau #166534), ikon persegi latar putih dari logo (192, 512, maskable 512, apple-touch-icon 180), favicon logo, dan service worker minimal TANPA cache (install langsung aktif, hapus cache lama, fetch tidak dicegat) supaya update aplikasi tidak pernah basi. Pasang dari menu browser HP (Chrome: "Tambahkan ke Layar utama").
 
 ## Batasan yang diketahui
 - Aplikasi Admin dibuka lewat URL `/admin` tanpa kata sandi — siapa pun

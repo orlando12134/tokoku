@@ -307,6 +307,9 @@ const MIME = {
   '.webp': 'image/webp',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
+  // FITUR: PWA — manifest harus disajikan sebagai application/manifest+json
+  // supaya Chrome menerimanya sebagai manifest aplikasi.
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
 
 function serveStatic(req, res, urlPath) {
