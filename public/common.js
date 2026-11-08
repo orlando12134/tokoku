@@ -7,6 +7,19 @@
 var API = '/api';
 var SLOTS = ['09.00-10.00', '11.00-12.00', '16.00-17.00', '19.00-20.00'];
 
+// FITUR: PWA — daftarkan service worker minimal (tanpa cache) supaya
+// syarat install "Tambahkan ke Layar utama" terpenuhi. Pendaftaran bersifat
+// menjaga: hanya mendaftar bila berkas /sw.js benar-benar tersaji (cek HEAD
+// dulu), dan gagal diam-diam bila tidak ada — aplikasi tetap jalan normal
+// tanpa service worker.
+(function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  fetch('/sw.js', { method: 'HEAD' }).then(function (r) {
+    if (!r.ok) return;
+    return navigator.serviceWorker.register('/sw.js');
+  }).catch(function () { /* abaikan: aplikasi tetap jalan tanpa SW */ });
+})();
+
 // ---------- State bersama ----------
 var settings = { deliveryFee: 2000, freeShippingBalance: false, storeOpen: 1 };
 var products = [];
