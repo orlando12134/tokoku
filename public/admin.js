@@ -28,6 +28,153 @@ var liveTimer = null;
 var pollBusy = false;
 var lastLive = { home: '', orders: '', warga: '', topups: '', threads: '', products: '', settings: '', unread: null };
 
+// FITUR: Keamanan Admin 2026-11-14 — password + authenticator (TOTP).
+// Layar login tampil sebelum data admin apa pun dimuat; sesi dicek lewat
+// /api/admin/me. Bila server menolak sesi (401), api() memanggil
+// onUnauthorized() -> token dibersihkan dan layar login tampil lagi.
+var adminAuthed = false;
+var adminTotpEnabled = false;
+var adminHasPassword = false;
+function onUnauthorized() {
+  setAdminToken(null);
+  adminAuthed = false;
+  renderLogin();
+}
+async function initAdminAuth() {
+  try {
+    var st = await api('/admin/status');
+    adminHasPassword = !!st.hasPassword;
+    adminTotpEnabled = !!st.totpEnabled;
+  } catch (e) { adminHasPassword = true; adminTotpEnabled = false; }
+  if (adminToken) {
+    try {
+      var me = await api('/admin/me');
+      adminTotpEnabled = !!me.totpEnabled;
+      adminAuthed = true;
+      render();
+      return;
+    } catch (e) { setAdminToken(null); }
+  }
+  adminAuthed = false;
+  renderLogin();
+}
+function renderLogin() {
+  var view = $('view');
+  if (view) view.innerHTML = '<div class="card"><h2>Masuk Admin</h2>' +
+    (adminHasPassword
+      ? '<p class="muted">Aplikasi admin dilindungi password dan authenticator. Masuk untuk melanjutkan.</p>'
+      : '<p class="muted"><b>Password admin belum diatur.</b> Hubungi pengelola untuk mengatur password awal, lalu masuk di sini.</p>') +
+    '<label>Password admin<input id="adminLoginPass" type="password" autocomplete="current-password" placeholder="Password admin"></label>' +
+    (adminTotpEnabled ? '<label>Kode authenticator (6 digit)<input id="adminLoginTotp" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"></label>' : '') +
+    '<p id="adminLoginErr" class="err" hidden></p>' +
+    '<button type="button" class="btn btn-primary" onclick="doAdminLogin()">Masuk</button></div>';
+  renderNav();
+  hideSplash();
+}
+async function doAdminLogin() {
+  var passEl = $('adminLoginPass');
+  var totpEl = $('adminLoginTotp');
+  var errEl = $('adminLoginErr');
+  var password = passEl ? passEl.value : '';
+  var totp = totpEl ? totpEl.value : '';
+  if (!password) { if (errEl) { errEl.textContent = 'Isi password admin.'; errEl.hidden = false; } return; }
+  try {
+    var r = await api('/admin/login', { method: 'POST', body: { password: password, totp: totp } });
+    setAdminToken(r.token);
+    adminTotpEnabled = !!r.totpEnabled;
+    adminAuthed = true;
+    toast('Berhasil masuk.');
+    render();
+  } catch (e) {
+    if (errEl) { errEl.textContent = e.message || 'Password atau kode salah.'; errEl.hidden = false; }
+  }
+}
+async function doAdminLogout() {
+  try { await api('/admin/logout', { method: 'POST', body: {} }); } catch (e) {}
+  setAdminToken(null);
+  adminAuthed = false;
+  renderLogin();
+}
+// FITUR: Keamanan Admin — cetak struk memakai fetch + token (bukan
+// window.open langsung, karena struk kini wajib sesi login); HTML struk
+// dibuka lewat blob URL.
+async function printStruk(id) {
+  try {
+    var res = await fetch(API + '/orders/' + id + '/struk', { headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {} });
+    if (res.status === 401) { onUnauthorized(); return; }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var html = await res.text();
+    var url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    window.open(url, '_blank');
+  } catch (e) { toast('Gagal membuka struk: ' + (e.message || e), false); }
+}
+async function openTotpSetup() {
+  try {
+    var r = await api('/admin/totp/setup', { method: 'POST', body: {} });
+    openModal('<h2>Aktifkan authenticator</h2>' +
+      '<p>1. Buka aplikasi authenticator di HP (Google Authenticator, Authy, atau 2FAS).</p>' +
+      '<p>2. Pilih "Enter a setup key" / "Masukkan kunci penyiapan".</p>' +
+      '<p>3. Nama akun: <b>tokoku admin</b><br>Kunci: <code id="totpSecretText">' + esc(r.secret) + '</code> ' +
+      '<button type="button" class="btn btn-secondary btn-small" onclick="copyTotpSecret()">Salin kunci</button></p>' +
+      '<p>4. Masukkan kode 6 digit dari aplikasi di bawah ini, lalu tekan Verifikasi.</p>' +
+      '<label>Kode authenticator<input id="totpVerifyCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456"></label>' +
+      '<p id="totpVerifyErr" class="err" hidden></p>' +
+      '<button type="button" class="btn btn-primary" onclick="doTotpVerify()">Verifikasi &amp; aktifkan</button>');
+  } catch (e) { toast('Gagal: ' + (e.message || e), false); }
+}
+function copyTotpSecret() {
+  var el = $('totpSecretText');
+  if (!el) return;
+  var txt = el.textContent;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(function () { toast('Kunci disalin.'); }, function () { toast('Gagal menyalin.', false); });
+  } else { toast('Salin manual kunci di atas.', false); }
+}
+async function doTotpVerify() {
+  var codeEl = $('totpVerifyCode'); var errEl = $('totpVerifyErr');
+  try {
+    await api('/admin/totp/verify', { method: 'POST', body: { code: codeEl ? codeEl.value : '' } });
+    closeModal(); adminTotpEnabled = true; toast('Authenticator aktif. Login berikutnya wajib memasukkan kode.');
+    render();
+  } catch (e) { if (errEl) { errEl.textContent = e.message || 'Kode salah.'; errEl.hidden = false; } }
+}
+function openChangePassword() {
+  openModal('<h2>Ubah password admin</h2>' +
+    '<label>Password saat ini<input id="pwCurrent" type="password" autocomplete="current-password"></label>' +
+    '<label>Password baru (minimal 8 karakter)<input id="pwNew" type="password" autocomplete="new-password"></label>' +
+    '<label>Ulangi password baru<input id="pwNew2" type="password" autocomplete="new-password"></label>' +
+    (adminTotpEnabled ? '<label>Kode authenticator<input id="pwTotp" type="text" inputmode="numeric" maxlength="6" placeholder="123456"></label>' : '') +
+    '<p id="pwChangeErr" class="err" hidden></p>' +
+    '<button type="button" class="btn btn-primary" onclick="doChangePassword()">Simpan password baru</button>');
+}
+async function doChangePassword() {
+  var cur = $('pwCurrent'); var nw = $('pwNew'); var nw2 = $('pwNew2'); var tp = $('pwTotp'); var errEl = $('pwChangeErr');
+  var fail = function (m) { if (errEl) { errEl.textContent = m; errEl.hidden = false; } };
+  if (!cur || !cur.value) return fail('Isi password saat ini.');
+  if (!nw || nw.value.length < 8) return fail('Password baru minimal 8 karakter.');
+  if (nw.value !== (nw2 && nw2.value)) return fail('Password baru tidak sama dengan ulangannya.');
+  try {
+    await api('/admin/password/change', { method: 'POST', body: { currentPassword: cur.value, newPassword: nw.value, totp: tp ? tp.value : '' } });
+    closeModal(); toast('Password admin berhasil diubah.');
+  } catch (e) { fail(e.message || 'Gagal mengubah password.'); }
+}
+function openTotpDisable() {
+  openModal('<h2>Nonaktifkan authenticator</h2>' +
+    '<p>Setelah dinonaktifkan, login admin hanya memakai password. Pastikan kamu yakin.</p>' +
+    '<label>Password admin<input id="totpOffPass" type="password" autocomplete="current-password"></label>' +
+    (adminTotpEnabled ? '<label>Kode authenticator saat ini<input id="totpOffCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456"></label>' : '') +
+    '<p id="totpOffErr" class="err" hidden></p>' +
+    '<button type="button" class="btn btn-primary" onclick="doTotpDisable()">Nonaktifkan</button>');
+}
+async function doTotpDisable() {
+  var p = $('totpOffPass'); var c = $('totpOffCode'); var errEl = $('totpOffErr');
+  try {
+    await api('/admin/totp/disable', { method: 'POST', body: { password: p ? p.value : '', code: c ? c.value : '' } });
+    closeModal(); adminTotpEnabled = false; toast('Authenticator dinonaktifkan.');
+    render();
+  } catch (e) { if (errEl) { errEl.textContent = e.message || 'Gagal menonaktifkan.'; errEl.hidden = false; } }
+}
+
 function isApproved(w) { if (!w) return false; var s = String(w.status || '').toLowerCase(); return s === 'approved' || s === 'verified' || s === 'active' || w.approved === 1 || w.approved === true || w.verified === 1; }
 function isPending(w) { if (!w) return false; var s = String(w.status || '').toLowerCase(); return s === 'pending' || s === 'menunggu' || s === 'waiting'; }
 function rejectReason(w) { return (w && (w.rejectReason || w.rejectionReason || w.reason)) || ''; }
@@ -48,6 +195,9 @@ async function refreshUnread() {
 }
 
 async function render() {
+  // FITUR: Keamanan Admin — tanpa sesi login, tampilkan layar login dan
+  // jangan memuat data admin apa pun.
+  if (!adminAuthed) { renderLogin(); return; }
   // FITUR: Performa — tiga fetch independen dijalankan PARALEL; sebelumnya
   // berurutan sehingga satu klik menu menunggu 4-6 detik. Produk memakai
   // pola lite-dulu (loadProducts).
@@ -83,6 +233,7 @@ function startLivePoll() {
   liveTimer = setInterval(pollLive, 10000);
 }
 async function pollLive() {
+  if (!adminAuthed) return; // FITUR: Keamanan Admin — polling hanya setelah login
   if (pollBusy) return; // FITUR: Performa — jangan tumpuk siklus polling bila siklus sebelumnya belum selesai
   pollBusy = true;
   try {
@@ -222,7 +373,15 @@ async function renderAdminHome(view) {
     '<button type="button" class="btn btn-block" onclick="saveDeliveryFee()">Simpan ongkir</button>' +
     '<div class="switch-row"><span>Gratis ongkir bila bayar pakai saldo</span><label class="switch"><input type="checkbox" ' + (settings.freeShippingBalance ? 'checked' : '') + ' onchange="toggleFreeShipping(this.checked)"><span class="slider"></span></label></div>' +
     '<div class="switch-row"><span>Toko Buka / Tutup</span><label class="switch"><input type="checkbox" ' + (isStoreOpen() ? 'checked' : '') + ' onchange="toggleStoreOpen(this.checked)"><span class="slider"></span></label></div>' +
-    '<p class="muted">Saat ini: <b>' + (isStoreOpen() ? 'Buka' : 'Tutup') + '</b> · Gratis ongkir saldo: <b>' + (settings.freeShippingBalance ? 'Aktif' : 'Mati') + '</b></p></div>';
+    '<p class="muted">Saat ini: <b>' + (isStoreOpen() ? 'Buka' : 'Tutup') + '</b> · Gratis ongkir saldo: <b>' + (settings.freeShippingBalance ? 'Aktif' : 'Mati') + '</b></p></div>' +
+    '<div class="card"><h2>Keamanan Admin</h2>' +
+    '<p>Authenticator: <b>' + (adminTotpEnabled ? 'Aktif' : 'Belum aktif') + '</b></p>' +
+    '<p class="muted">' + (adminTotpEnabled ? 'Login admin wajib memasukkan kode 6 digit dari aplikasi authenticator.' : 'Aktifkan authenticator supaya login admin memakai kode 6 digit dari aplikasi authenticator (Google Authenticator, Authy, atau 2FAS).') + '</p>' +
+    (adminTotpEnabled
+      ? '<button type="button" class="btn btn-secondary btn-block" onclick="openTotpDisable()">Nonaktifkan authenticator</button>'
+      : '<button type="button" class="btn btn-secondary btn-block" onclick="openTotpSetup()">Aktifkan authenticator</button>') +
+    '<button type="button" class="btn btn-secondary btn-block" onclick="openChangePassword()">Ubah password admin</button>' +
+    '<button type="button" class="btn btn-secondary btn-block" onclick="doAdminLogout()">Keluar</button></div>';
 }
 async function saveSettingsPatch(patch) {
   try { var s = await api('/settings', { method: 'POST', body: patch }); if (s) settings = s; toast('Pengaturan tersimpan.'); render(); }
@@ -318,7 +477,7 @@ async function renderAdminOrders(view) {
         '<p class="muted">' + fmtDate(o.createdAt || o.date) + ' · ' + esc(o.method === 'antar' ? 'Diantar' : 'Ambil') + ' · ' + esc(o.slot || '') + ' · ' + esc(o.payment === 'saldo' ? 'Saldo' : 'Tunai') + '</p>' +
         orderItemsHtml(o.items) + '<p><b>Total: ' + fmtRp(o.total) + '</b>' + (o.note ? '<br><span class="muted">Catatan: ' + esc(o.note) + '</span>' : '') + '</p>' +
         '<div class="row">' + (next ? '<button type="button" class="btn btn-small" onclick="setOrderStatus(' + o.id + ',\'' + next.send + '\')">Ubah ke ' + next.label + '</button>' : '') +
-        '<button type="button" class="btn btn-secondary btn-small" onclick="window.open(\'/api/orders/' + o.id + '/struk\',\'_blank\')">Cetak struk</button></div></div>';
+        '<button type="button" class="btn btn-secondary btn-small" onclick="printStruk(' + o.id + ')">Cetak struk</button></div></div>';
     }).join('') : '<div class="card"><p>Tidak ada pesanan untuk pencarian ini.</p></div>');
 }
 function applyOrderFilter() { adminOrderFilter = { date: ($('ordDate') || {}).value || '', slot: ($('ordSlot') || {}).value || '' }; render(); }
@@ -454,7 +613,8 @@ async function renderAdminChatThread(view, wargaId) {
 async function sendAdminChat() { if (adminChatWargaId) await sendChat('admin', adminChatWargaId); }
 
 // ---------- Start ----------
+// FITUR: Keamanan Admin — cek sesi dulu (login bila belum ada), baru render.
 // FITUR: Live update tanpa refresh — polling global tiap 10 detik.
-document.addEventListener('DOMContentLoaded', render);
-render();
+document.addEventListener('DOMContentLoaded', initAdminAuth);
+initAdminAuth();
 startLivePoll();

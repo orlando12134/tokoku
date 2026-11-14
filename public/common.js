@@ -163,16 +163,40 @@ function toast(msg, ok) {
   toastTimer = setTimeout(function () { el.hidden = true; }, 4000);
 }
 
+// FITUR: Keamanan Admin — token sesi admin (localStorage tokoku_admin_token).
+// Diatur admin.js setelah login; api() mengirimkannya sebagai Bearer agar
+// endpoint admin yang dilindungi bisa diakses. Warga tidak punya token,
+// endpoint warga tetap publik.
+var adminToken = null;
+try { adminToken = localStorage.getItem('tokoku_admin_token'); } catch (e) { adminToken = null; }
+function setAdminToken(t) {
+  adminToken = t || null;
+  try {
+    if (t) localStorage.setItem('tokoku_admin_token', t);
+    else localStorage.removeItem('tokoku_admin_token');
+  } catch (e) {}
+}
 // FITUR: helper API JSON — semua endpoint persis kontrak /api, tanpa endpoint karangan
 async function api(path, opts) {
   opts = opts || {};
+  var headers = { 'Content-Type': 'application/json' };
+  if (adminToken) headers['Authorization'] = 'Bearer ' + adminToken;
   var res = await fetch(API + path, {
     method: opts.method || 'GET',
-    headers: { 'Content-Type': 'application/json' },
+    headers: headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined
   });
   var data = null;
   try { data = await res.json(); } catch (e) { data = null; }
+  // FITUR: Keamanan Admin — sesi ditolak server (401): admin.js mendefinisikan
+  // onUnauthorized (bersihkan token + tampilkan layar login). Endpoint login
+  // sendiri dikecualikan (form login yang menangani errornya). PERHATIAN:
+  // path di sini TANPA awalan /api (pemanggil memakai '/admin/login',
+  // bukan '/api/admin/login') — salah tulis di sini membuat layar login
+  // ter-render ulang dan pesan error login hilang.
+  if (res.status === 401 && path !== '/admin/login' && typeof onUnauthorized === 'function') {
+    try { onUnauthorized(); } catch (e) {}
+  }
   if (!res.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + res.status));
   if (data && data.ok === false) throw new Error(data.error || 'Permintaan gagal');
   return data;
