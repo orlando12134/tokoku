@@ -22,6 +22,10 @@ var lastTopupProofs = {};
 // FITUR: Live update tanpa refresh — polling 10 detik, snapshot terakhir
 // tiap tab; tampilan hanya diperbarui bila data benar-benar berubah.
 var liveTimer = null;
+// FITUR: Performa 2026-11-14 — penjaga tumpang-tindih polling: bila satu
+// siklus polling belum selesai (server lambat), siklus berikutnya dilewati
+// supaya request tidak menumpuk di server.
+var pollBusy = false;
 var lastLive = { home: '', orders: '', warga: '', topups: '', threads: '', products: '', settings: '', unread: null };
 
 function isApproved(w) { if (!w) return false; var s = String(w.status || '').toLowerCase(); return s === 'approved' || s === 'verified' || s === 'active' || w.approved === 1 || w.approved === true || w.verified === 1; }
@@ -33,18 +37,21 @@ function setTab(t) {
   render();
 }
 
-// FITUR: lencana pesan belum dibaca (admin — total semua thread)
+// FITUR: lencana pesan belum dibaca (admin — total semua thread). Pakai
+// loadThreads (lite) supaya tidak mengunduh ulang foto warga tiap render.
 async function refreshUnread() {
   unreadAdminTotal = 0;
   try {
-    var threads = await api('/chat/threads');
+    var threads = await loadThreads();
     (threads || []).forEach(function (t) { unreadAdminTotal += Number(t.unreadAdmin) || 0; });
   } catch (e) {}
 }
 
 async function render() {
-  await loadSettings();
-  await loadProducts();
+  // FITUR: Performa — tiga fetch independen dijalankan PARALEL; sebelumnya
+  // berurutan sehingga satu klik menu menunggu 4-6 detik. Produk memakai
+  // pola lite-dulu (loadProducts).
+  await Promise.all([loadSettings(), loadProducts(), refreshUnread()]);
   var ss = $('storeStatus');
   if (ss) { ss.textContent = isStoreOpen() ? 'Toko Buka' : 'Toko Tutup'; ss.classList.toggle('closed', !isStoreOpen()); }
   await refreshUnread();
@@ -59,7 +66,8 @@ async function render() {
   // FITUR: Layar loading awal — sembunyikan splash hijau setelah render pertama.
   hideSplash();
   // FITUR: Live update tanpa refresh — catat snapshot data saat ini.
-  lastLive.products = JSON.stringify(products);
+  // FITUR: Performa — snapshot produk memakai kunci murah (tanpa bytes gambar).
+  lastLive.products = productsKey();
   lastLive.settings = JSON.stringify(settings);
   lastLive.unread = unreadAdminTotal;
 }
@@ -75,37 +83,52 @@ function startLivePoll() {
   liveTimer = setInterval(pollLive, 10000);
 }
 async function pollLive() {
+  if (pollBusy) return; // FITUR: Performa — jangan tumpuk siklus polling bila siklus sebelumnya belum selesai
+  pollBusy = true;
   try {
+    // FITUR: Performa — settings + thread chat paralel (sebelumnya berurutan).
+    var prefix = await Promise.all([
+      api('/settings').catch(function () { return null; }),
+      loadThreads().catch(function () { return []; })
+    ]);
+    var ssLive = prefix[0];
+    var threads = prefix[1] || [];
     // FITUR: Status toko live — poll /api/settings di SEMUA tab; bila
     // berubah, perbarui teks header tanpa refresh (dan saklar di Beranda
     // ikut diperbarui lewat kunci home di bawah, yang memakai settings
     // segar ini — sebelumnya kunci memakai settings basi dari render()).
-    var ssLive = await api('/settings');
-    var ssKey = JSON.stringify(ssLive);
-    if (ssKey !== lastLive.settings) {
-      settings = ssLive;
-      lastLive.settings = ssKey;
-      var ssEl = $('storeStatus');
-      if (ssEl) { ssEl.textContent = isStoreOpen() ? 'Toko Buka' : 'Toko Tutup'; ssEl.classList.toggle('closed', !isStoreOpen()); }
+    if (ssLive) {
+      var ssKey = JSON.stringify(ssLive);
+      if (ssKey !== lastLive.settings) {
+        settings = ssLive;
+        lastLive.settings = ssKey;
+        var ssEl = $('storeStatus');
+        if (ssEl) { ssEl.textContent = isStoreOpen() ? 'Toko Buka' : 'Toko Tutup'; ssEl.classList.toggle('closed', !isStoreOpen()); }
+      }
     }
-    var threads = await api('/chat/threads');
     var un = 0;
     (threads || []).forEach(function (t) { un += Number(t.unreadAdmin) || 0; });
     if (un !== lastLive.unread) { unreadAdminTotal = un; lastLive.unread = un; renderNav(); }
     if (adminTab === 'beranda') {
-      var orders = await api('/orders');
-      var topups = await api('/topup/pending');
-      var wargaList = await api('/admin/warga');
-      var key = JSON.stringify([orders, topups, wargaList, products, settings]);
+      // FITUR: Performa — pesanan + top-up + warga paralel (sebelumnya berurutan).
+      var homeData = await Promise.all([
+        loadOrderList('/orders', ''),
+        api('/topup/pending').catch(function () { return []; }),
+        loadWargaList()
+      ]);
+      var orders = homeData[0] || [];
+      var topups = homeData[1] || [];
+      var wargaList = homeData[2] || [];
+      var key = JSON.stringify([ordersKey(orders), topupsKey(topups), wargaKey(wargaList), productsKey(), settings]);
       if (key !== lastLive.home) {
         lastLive.home = key;
         if (viewHasFormFocus()) return; // jangan hapus isian ongkir yang sedang diketik
         await preserveScroll(function () { return renderAdminHome($('view')); });
       }
     } else if (adminTab === 'barang') {
-      var ps = await api('/products');
-      if (JSON.stringify(ps) !== lastLive.products) {
-        products = ps; lastLive.products = JSON.stringify(ps);
+      await loadProducts();
+      if (productsKey() !== lastLive.products) {
+        lastLive.products = productsKey();
         if (productEditId) return; // sedang ubah barang — jangan bangun ulang form
         if (viewHasFormFocus()) return;
         await preserveScroll(function () { renderAdminProducts($('view')); });
@@ -114,29 +137,29 @@ async function pollLive() {
       var q = '';
       if (adminOrderFilter.date) q += (q ? '&' : '?') + 'date=' + encodeURIComponent(adminOrderFilter.date);
       if (adminOrderFilter.slot) q += (q ? '&' : '?') + 'slot=' + encodeURIComponent(adminOrderFilter.slot);
-      var ords = await api('/orders' + q);
-      var ok = JSON.stringify(ords);
+      var ords = await loadOrderList('/orders', q);
+      var ok = ordersKey(ords);
       if (ok !== lastLive.orders) {
         lastLive.orders = ok;
         await preserveScroll(function () { return renderAdminOrders($('view')); });
       }
     } else if (adminTab === 'warga') {
-      var wl = await api('/admin/warga');
-      var wk = JSON.stringify(wl);
+      var wl = await loadWargaList();
+      var wk = wargaKey(wl);
       if (wk !== lastLive.warga) {
         lastLive.warga = wk;
         await preserveScroll(function () { return renderAdminWarga($('view')); });
       }
     } else if (adminTab === 'topup') {
       var tp = await api('/topup/pending');
-      var tk = JSON.stringify(tp);
+      var tk = topupsKey(tp);
       if (tk !== lastLive.topups) {
         lastLive.topups = tk;
         await preserveScroll(function () { return renderAdminTopup($('view')); });
       }
     } else if (adminTab === 'chat') {
       if (adminChatWargaId) {
-        var d = await api('/chat/' + adminChatWargaId);
+        var d = await loadChat(adminChatWargaId);
         var key2 = (d.messages || []).map(function (m) { return m.id; }).join(',');
         if (key2 !== lastAdminChatKey) {
           lastAdminChatKey = key2;
@@ -148,7 +171,7 @@ async function pollLive() {
           }
         }
       } else {
-        var th = JSON.stringify(threads);
+        var th = threadsKey(threads);
         if (th !== lastLive.threads) {
           lastLive.threads = th;
           await preserveScroll(function () { return renderAdminChat($('view')); });
@@ -156,6 +179,7 @@ async function pollLive() {
       }
     }
   } catch (e) { /* polling gagal sesaat — coba lagi 10 detik berikut */ }
+  finally { pollBusy = false; }
 }
 
 function renderNav() {
@@ -170,13 +194,20 @@ function renderNav() {
 // FITUR: Beranda admin — antrean, ongkir, gratis ongkir saldo, toko buka/tutup
 async function renderAdminHome(view) {
   var orders = [], topups = [], wargaList = [];
-  try { orders = await api('/orders'); } catch (e) {}
-  try { topups = await api('/topup/pending'); } catch (e) {}
-  try { wargaList = await api('/admin/warga'); } catch (e) {}
+  // FITUR: Performa — tiga fetch independen paralel (sebelumnya berurutan).
+  var homeData = await Promise.all([
+    loadOrderList('/orders', ''),
+    api('/topup/pending').catch(function () { return []; }),
+    loadWargaList()
+  ]);
+  orders = homeData[0] || [];
+  topups = homeData[1] || [];
+  wargaList = homeData[2] || [];
   if (!Array.isArray(orders)) orders = [];
   if (!Array.isArray(topups)) topups = [];
   if (!Array.isArray(wargaList)) wargaList = [];
-  lastLive.home = JSON.stringify([orders, topups, wargaList, products, settings]);
+  // FITUR: Performa — kunci home memakai kunci murah (tanpa bytes gambar).
+  lastLive.home = JSON.stringify([ordersKey(orders), topupsKey(topups), wargaKey(wargaList), productsKey(), settings]);
   var newOrders = orders.filter(function (o) { return orderStatusRaw(o.status) === 'baru'; }).length;
   var pendingWarga = wargaList.filter(function (w) { return isPending(w); }).length;
   var lowStock = products.filter(function (p) { return Number(p.stock || 0) <= 5; }).length;
@@ -254,7 +285,10 @@ async function submitProduct(e) {
     if (productEditId) await api('/products/' + productEditId, { method: 'PUT', body: body });
     else await api('/products', { method: 'POST', body: body });
     toast(productEditId ? 'Barang berhasil diubah.' : 'Barang berhasil ditambahkan.');
-    productEditId = null; pendingProductImage = null; render();
+    productEditId = null; pendingProductImage = null;
+    // FITUR: Performa — foto barang mungkin berubah: muat ulang penuh sekali
+    // supaya cache gambar diperbarui, baru render.
+    await loadProducts(true); render();
   } catch (err) { toast('Gagal menyimpan barang: ' + err.message, false); }
 }
 
@@ -264,9 +298,9 @@ async function renderAdminOrders(view) {
   if (adminOrderFilter.date) q += (q ? '&' : '?') + 'date=' + encodeURIComponent(adminOrderFilter.date);
   if (adminOrderFilter.slot) q += (q ? '&' : '?') + 'slot=' + encodeURIComponent(adminOrderFilter.slot);
   var orders = [];
-  try { orders = await api('/orders' + q); } catch (e) { toast('Gagal memuat pesanan: ' + e.message, false); }
+  try { orders = await loadOrderList('/orders', q); } catch (e) { toast('Gagal memuat pesanan: ' + e.message, false); }
   if (!Array.isArray(orders)) orders = [];
-  lastLive.orders = JSON.stringify(orders);
+  lastLive.orders = ordersKey(orders);
   view.innerHTML = '<h1>Pesanan</h1><div class="card"><h2>Pencarian</h2>' +
     '<label>Tanggal pesanan</label><input id="ordDate" type="date" value="' + esc(adminOrderFilter.date) + '">' +
     '<label>Jam antar / ambil</label><select id="ordSlot"><option value="">Semua jam</option>' + SLOTS.map(function (s) { return '<option ' + (adminOrderFilter.slot === s ? 'selected' : '') + '>' + s + '</option>'; }).join('') + '</select>' +
@@ -296,9 +330,9 @@ async function setOrderStatus(id, status) {
 // FITUR: Warga admin — setujui/tolak (kotak alasan), riwayat transaksi
 async function renderAdminWarga(view) {
   var list = [];
-  try { list = await api('/admin/warga'); } catch (e) { toast('Gagal memuat warga: ' + e.message, false); }
+  try { list = await loadWargaList(); } catch (e) { toast('Gagal memuat warga: ' + e.message, false); }
   if (!Array.isArray(list)) list = [];
-  lastLive.warga = JSON.stringify(list);
+  lastLive.warga = wargaKey(list);
   view.innerHTML = '<h1>Warga</h1>' + (list.length ? list.map(function (w) {
     var st = w.status || '';
     // FITUR: Foto profil warga — foto di daftar warga (termasuk yang
@@ -346,7 +380,7 @@ async function renderAdminTopup(view) {
   var list = [];
   try { list = await api('/topup/pending'); } catch (e) { toast('Gagal memuat top-up: ' + e.message, false); }
   if (!Array.isArray(list)) list = [];
-  lastLive.topups = JSON.stringify(list);
+  lastLive.topups = topupsKey(list);
   view.innerHTML = '<h1>Top-up Menunggu</h1>' + (list.length ? list.map(function (t) {
     if (t.proof) lastTopupProofs[t.id] = t.proof;
     return '<div class="card"><div class="warga-row">' + avatarHtml({ name: t.wargaName, photo: t.wargaPhoto }, 'avatar-sm') + '<div class="warga-info"><b>' + fmtRp(t.amount) + '</b> <span class="status-pill">' + esc(t.method || '') + '</span>' +
@@ -377,9 +411,9 @@ function rejectTopup(id) {
 async function renderAdminChat(view) {
   if (adminChatWargaId) { await renderAdminChatThread(view, adminChatWargaId); return; }
   var threads = [];
-  try { threads = await api('/chat/threads'); } catch (e) { toast('Gagal memuat chat: ' + e.message, false); }
+  try { threads = await loadThreads(); } catch (e) { toast('Gagal memuat chat: ' + e.message, false); }
   if (!Array.isArray(threads)) threads = [];
-  lastLive.threads = JSON.stringify(threads);
+  lastLive.threads = threadsKey(threads);
   view.innerHTML = '<h1>Chat Warga</h1>' + (threads.length ? threads.map(function (t) {
     // PERBAIKAN: lastMessage dari API berupa objek {text,image,...}, bukan string.
     var lm = t.lastMessage;
@@ -392,12 +426,19 @@ async function renderAdminChat(view) {
 }
 async function renderAdminChatThread(view, wargaId) {
   var data = { messages: [] };
-  try { data = await api('/chat/' + wargaId); } catch (e) { toast('Gagal memuat chat: ' + e.message, false); }
-  var msgs = data.messages || [];
-  lastAdminChatKey = msgs.map(function (m) { return m.id; }).join(',');
   var name = '';
   var threadPhoto = null;
-  try { var threads = await api('/chat/threads'); var th = (threads || []).find(function (t) { return String(t.wargaId) === String(wargaId); }); if (th) { name = th.wargaName || ''; threadPhoto = th.wargaPhoto || null; } } catch (e) {}
+  // FITUR: Performa — pesan + daftar thread paralel (sebelumnya berurutan).
+  var threadData = await Promise.all([
+    loadChat(wargaId).catch(function () { return { messages: [] }; }),
+    loadThreads().catch(function () { return []; })
+  ]);
+  data = threadData[0] || { messages: [] };
+  var threads = threadData[1] || [];
+  var th = (threads || []).find(function (t) { return String(t.wargaId) === String(wargaId); });
+  if (th) { name = th.wargaName || ''; threadPhoto = th.wargaPhoto || null; }
+  var msgs = data.messages || [];
+  lastAdminChatKey = msgs.map(function (m) { return m.id; }).join(',');
   view.innerHTML = '<button type="button" class="btn btn-secondary btn-small" onclick="adminChatWargaId=null;render()">← Semua chat</button>' +
     '<div class="warga-row" style="margin:10px 0">' + avatarHtml({ name: name, photo: threadPhoto }, 'avatar-sm') + '<h1 style="margin:0">Chat — ' + esc(name || ('Warga #' + wargaId)) + '</h1></div><div class="card"><div class="chat-box" id="chatBox">' +
     (msgs.length ? chatBubblesHtml(msgs, 'admin') : '<p class="muted">Belum ada pesan.</p>') + '</div>' +

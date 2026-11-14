@@ -17,6 +17,10 @@ var lastChatKey = '';
 // FITUR: Live update tanpa refresh — polling 10 detik, snapshot terakhir
 // tiap tab; tampilan hanya diperbarui bila data benar-benar berubah.
 var liveTimer = null;
+// FITUR: Performa 2026-11-14 — penjaga tumpang-tindih polling: bila satu
+// siklus polling belum selesai (server lambat), siklus berikutnya dilewati
+// supaya request tidak menumpuk di server.
+var pollBusy = false;
 var lastLive = { orders: '', balance: null, topupPending: null, warga: '', products: '', settings: '', unread: null };
 var detailProductId = null;
 var detailQty = 1;
@@ -63,12 +67,13 @@ function setTab(t) {
   render();
 }
 
-// FITUR: lencana pesan belum dibaca (warga)
+// FITUR: lencana pesan belum dibaca (warga) — pakai loadChat (lite) supaya
+// tidak mengunduh ulang gambar chat hanya untuk menghitung yang belum dibaca.
 async function refreshUnread() {
   unreadWarga = 0;
   try {
     if (warga && warga.id) {
-      var c = await api('/chat/' + warga.id);
+      var c = await loadChat(warga.id);
       unreadWarga = (c && c.unreadWarga) || 0;
     }
   } catch (e) {}
@@ -85,57 +90,71 @@ function startLivePoll() {
   liveTimer = setInterval(pollLive, 10000);
 }
 async function pollLive() {
+  if (pollBusy) return; // FITUR: Performa — jangan tumpuk siklus polling bila siklus sebelumnya belum selesai
   if (!warga || !warga.phone) return;
+  pollBusy = true;
   try {
+    // FITUR: Performa — tiga fetch independen (status warga, chat, settings)
+    // dijalankan PARALEL; sebelumnya berurutan dan masing-masing ~1 detik.
+    var results = await Promise.all([
+      api('/login', { method: 'POST', body: { phone: warga.phone } }).catch(function () { return null; }),
+      loadChat(warga.id).catch(function () { return { messages: [], unreadWarga: 0 }; }),
+      api('/settings').catch(function () { return null; })
+    ]);
+    var r = results[0];
+    var c = results[1] || { messages: [], unreadWarga: 0 };
+    var ssLive = results[2];
     // Status warga (disetujui/ditolak admin) — berlaku di semua tab.
-    var r = await api('/login', { method: 'POST', body: { phone: warga.phone } });
-    if (r.found && r.warga) {
-      var wk = JSON.stringify(r.warga);
-      if (wk !== lastLive.warga) { warga = r.warga; saveLocal(); render(); return; }
+    if (r && r.found && r.warga) {
+      var wk = wargaKey([r.warga]);
+      if (wk !== lastLive.warga) { warga = r.warga; saveLocal(); lastLive.warga = wk; render(); return; }
     }
     if (!isApproved(warga)) return;
     // Lencana chat belum dibaca.
-    var c = await api('/chat/' + warga.id);
     var un = (c && c.unreadWarga) || 0;
     if (un !== lastLive.unread) { unreadWarga = un; lastLive.unread = un; renderNav(); }
     // FITUR: Status toko live — poll /api/settings di SEMUA tab (bukan
     // hanya Belanja); bila berubah, perbarui teks header + etalase /
     // keranjang tanpa refresh.
-    var ssLive = await api('/settings');
-    var ssKey = JSON.stringify(ssLive);
-    if (ssKey !== lastLive.settings) {
-      var wasOpen = isStoreOpen();
-      settings = ssLive;
-      lastLive.settings = ssKey;
-      var ssEl = $('storeStatus');
-      if (ssEl) { ssEl.textContent = isStoreOpen() ? 'Toko Buka' : 'Toko Tutup'; ssEl.classList.toggle('closed', !isStoreOpen()); }
-      if (isStoreOpen() !== wasOpen) {
-        if (wargaTab === 'belanja') {
-          await preserveScroll(function () { renderShop($('view')); updateCartBar(); });
-        } else if (wargaTab === 'keranjang') {
-          if (!viewHasFormFocus()) await preserveScroll(function () { renderCartView($('view')); });
+    if (ssLive) {
+      var ssKey = JSON.stringify(ssLive);
+      if (ssKey !== lastLive.settings) {
+        var wasOpen = isStoreOpen();
+        settings = ssLive;
+        lastLive.settings = ssKey;
+        var ssEl = $('storeStatus');
+        if (ssEl) { ssEl.textContent = isStoreOpen() ? 'Toko Buka' : 'Toko Tutup'; ssEl.classList.toggle('closed', !isStoreOpen()); }
+        if (isStoreOpen() !== wasOpen) {
+          if (wargaTab === 'belanja') {
+            await preserveScroll(function () { renderShop($('view')); updateCartBar(); });
+          } else if (wargaTab === 'keranjang') {
+            if (!viewHasFormFocus()) await preserveScroll(function () { renderCartView($('view')); });
+          }
+          updateCartBar();
         }
-        updateCartBar();
       }
     }
     if (wargaTab === 'belanja') {
-      var ps = await api('/products');
-      if (JSON.stringify(ps) !== lastLive.products) {
-        products = ps; await preserveScroll(function () { renderShop($('view')); updateCartBar(); });
-        lastLive.products = JSON.stringify(ps);
+      await loadProducts();
+      if (productsKey() !== lastLive.products) {
+        lastLive.products = productsKey();
+        await preserveScroll(function () { renderShop($('view')); updateCartBar(); });
       }
     } else if (wargaTab === 'pesanan') {
-      var orders = await api('/warga/' + warga.id + '/orders');
-      var ok = JSON.stringify(orders);
+      var orders = await loadOrderList('/warga/' + warga.id + '/orders', '');
+      var ok = ordersKey(orders);
       if (ok !== lastLive.orders) {
         lastLive.orders = ok;
         await preserveScroll(function () { return renderWargaOrders($('view')); });
       }
     } else if (wargaTab === 'saldo') {
-      var b = await api('/warga/' + warga.id + '/balance');
-      var s = await api('/warga/' + warga.id + '/topup-status');
-      var bal = (b && b.balance) || 0;
-      var pend = !!(s && s.hasPending);
+      // FITUR: Performa — saldo + status top-up paralel.
+      var bs = await Promise.all([
+        api('/warga/' + warga.id + '/balance').catch(function () { return null; }),
+        api('/warga/' + warga.id + '/topup-status').catch(function () { return null; })
+      ]);
+      var bal = (bs[0] && bs[0].balance) || 0;
+      var pend = !!(bs[1] && bs[1].hasPending);
       if (bal !== lastLive.balance || pend !== lastLive.topupPending) {
         lastLive.balance = bal; lastLive.topupPending = pend;
         if (viewHasFormFocus()) return; // jangan hapus isian top-up yang sedang diketik
@@ -153,20 +172,22 @@ async function pollLive() {
         }
       }
     } else if (wargaTab === 'keranjang') {
-      var ps2 = await api('/products');
-      if (JSON.stringify(ps2) !== lastLive.products) {
-        products = ps2; lastLive.products = JSON.stringify(ps2);
+      await loadProducts();
+      if (productsKey() !== lastLive.products) {
+        lastLive.products = productsKey();
         if (viewHasFormFocus()) return;
         await preserveScroll(function () { renderCartView($('view')); });
       }
     }
   } catch (e) { /* polling gagal (mis. offline sesaat) — coba lagi 10 detik berikut */ }
+  finally { pollBusy = false; }
 }
 
 async function render() {
-  await loadSettings();
-  await loadProducts();
-  await refreshWarga(); // status warga bisa berubah di server (disetujui/ditolak admin)
+  // FITUR: Performa — empat fetch independen dijalankan PARALEL; sebelumnya
+  // berurutan sehingga satu klik menu menunggu 4-6 detik (settings + produk
+  // 2,1 MB + login + chat). Produk memakai pola lite-dulu (loadProducts).
+  await Promise.all([loadSettings(), loadProducts(), refreshWarga(), refreshUnread()]);
   var ss = $('storeStatus');
   if (ss) { ss.textContent = isStoreOpen() ? 'Toko Buka' : 'Toko Tutup'; ss.classList.toggle('closed', !isStoreOpen()); }
   await refreshUnread();
@@ -186,8 +207,9 @@ async function render() {
   // FITUR: Live update tanpa refresh — catat snapshot data saat ini supaya
   // polling 10 detik hanya membangun ulang bila ada yang berubah.
   // (orders/saldo dicatat di renderWargaOrders/renderSaldo.)
-  lastLive.warga = JSON.stringify(warga);
-  lastLive.products = JSON.stringify(products);
+  // FITUR: Performa — snapshot memakai kunci murah (tanpa bytes gambar).
+  lastLive.warga = wargaKey(warga ? [warga] : []);
+  lastLive.products = productsKey();
   lastLive.settings = JSON.stringify(settings);
   lastLive.unread = unreadWarga;
 }
@@ -512,9 +534,9 @@ async function submitOrder() {
 // FITUR: Pesanan warga — batalkan hanya bila status Baru
 async function renderWargaOrders(view) {
   var orders = [];
-  try { orders = await api('/warga/' + warga.id + '/orders'); } catch (e) { toast('Gagal memuat pesanan: ' + e.message, false); }
+  try { orders = await loadOrderList('/warga/' + warga.id + '/orders', ''); } catch (e) { toast('Gagal memuat pesanan: ' + e.message, false); }
   if (!Array.isArray(orders)) orders = [];
-  lastLive.orders = JSON.stringify(orders);
+  lastLive.orders = ordersKey(orders);
   var html = '<h1>Pesanan Saya</h1>';
   if (!orders.length) html += '<div class="card"><p>Belum ada pesanan.</p></div>';
   orders.forEach(function (o) {
@@ -553,8 +575,13 @@ async function cancelOrder(orderId) {
 // FITUR: Saldo — peringatan tidak bisa diuangkan, QRIS, form top-up / pengajuan menunggu
 async function renderSaldo(view) {
   var balance = 0, hasPending = false;
-  try { var b = await api('/warga/' + warga.id + '/balance'); balance = (b && b.balance) || 0; } catch (e) {}
-  try { var s = await api('/warga/' + warga.id + '/topup-status'); hasPending = !!(s && s.hasPending); } catch (e) {}
+  // FITUR: Performa — saldo + status top-up paralel (sebelumnya berurutan).
+  var bs = await Promise.all([
+    api('/warga/' + warga.id + '/balance').catch(function () { return null; }),
+    api('/warga/' + warga.id + '/topup-status').catch(function () { return null; })
+  ]);
+  balance = (bs[0] && bs[0].balance) || 0;
+  hasPending = !!(bs[1] && bs[1].hasPending);
   lastLive.balance = balance; lastLive.topupPending = hasPending;
   var html = '<h1>Saldo Saya</h1><div class="card"><div class="muted">Saldo tokoku</div><h1 id="saldoValue" style="font-size:28px">' + fmtRp(balance) + '</h1></div>' +
     // FITUR: Peringatan saldo — teks PERSIS seperti yang diminta, di bawah
@@ -605,7 +632,7 @@ async function submitTopup(e) {
 // FITUR: Chat warga — teks + gambar (lampirkan, pratinjau, gelembung), lencana belum dibaca
 async function renderWargaChat(view) {
   var data = { messages: [], unreadWarga: 0 };
-  try { data = await api('/chat/' + warga.id); } catch (e) { toast('Gagal memuat chat: ' + e.message, false); }
+  try { data = await loadChat(warga.id); } catch (e) { toast('Gagal memuat chat: ' + e.message, false); }
   var msgs = data.messages || [];
   lastChatKey = msgs.map(function (m) { return m.id; }).join(',');
   view.innerHTML = '<h1>Chat Toko</h1><div class="card"><div class="chat-box" id="chatBox">' +

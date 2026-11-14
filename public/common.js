@@ -238,7 +238,194 @@ async function submitReason() {
 function stopChatPoll() { if (chatPoll) { clearInterval(chatPoll); chatPoll = null; } }
 
 async function loadSettings() { try { var s = await api('/settings'); if (s) settings = s; } catch (e) {} }
-async function loadProducts() { try { products = await api('/products'); if (!Array.isArray(products)) products = []; } catch (e) { products = []; } }
+
+// FITUR: Performa 2026-11-14 — cache gambar beralamat hash (satu peta untuk
+// semua gambar: foto produk, foto profil warga, snapshot item pesanan,
+// gambar chat). Server mengirim hash MD5 12 karakter dari string data-URL
+// gambar; bytes gambar hanya diunduh sekali per sesi lewat endpoint penuh,
+// lalu dipakai ulang dari cache untuk endpoint lite. Gambar yang berubah
+// (hash baru) otomatis diunduh ulang karena hash-nya tidak ada di cache.
+var imgCache = {};
+function cacheImage(dataUrl, hash) {
+  if (dataUrl && hash) imgCache[hash] = dataUrl;
+}
+function cachedImage(hash) {
+  return (hash && imgCache[hash]) || null;
+}
+// Gabungkan bytes gambar dari cache ke baris lite (baris yang sudah membawa
+// bytes dari endpoint penuh sekaligus disimpan ke cache). Kembalikan true
+// bila ada gambar yang masih hilang dan perlu diambil lewat endpoint penuh.
+function mergeProductImages(list) {
+  var missing = false;
+  (list || []).forEach(function (p) {
+    if (p.image) { cacheImage(p.image, p.imageHash); return; }
+    if (p.imageHash) {
+      var c = cachedImage(p.imageHash);
+      if (c) p.image = c; else missing = true;
+    }
+  });
+  return missing;
+}
+function mergeWargaPhotos(list) {
+  var missing = false;
+  (list || []).forEach(function (w) {
+    if (w.photo) { cacheImage(w.photo, w.photoHash); return; }
+    if (w.photoHash) {
+      var c = cachedImage(w.photoHash);
+      if (c) w.photo = c; else missing = true;
+    }
+  });
+  return missing;
+}
+function mergeOrderImages(orders) {
+  var missing = false;
+  (orders || []).forEach(function (o) {
+    var items = parseItems(o.items);
+    items.forEach(function (it) {
+      if (it.image) { cacheImage(it.image, it.imageHash); return; }
+      if (it.imageHash) {
+        var c = cachedImage(it.imageHash);
+        if (c) it.image = c; else missing = true;
+      }
+    });
+    // Simpan sebagai array hasil parse agar render berikutnya tidak perlu
+    // parse ulang string JSON yang sama (parseItems menangani array).
+    o.items = items;
+  });
+  return missing;
+}
+function mergeThreadPhotos(threads) {
+  var missing = false;
+  (threads || []).forEach(function (t) {
+    if (t.wargaPhoto) { cacheImage(t.wargaPhoto, t.wargaPhotoHash); return; }
+    if (t.wargaPhotoHash) {
+      var c = cachedImage(t.wargaPhotoHash);
+      if (c) t.wargaPhoto = c; else missing = true;
+    }
+  });
+  return missing;
+}
+function mergeChatImages(msgs) {
+  var missing = false;
+  (msgs || []).forEach(function (m) {
+    if (m.image) { cacheImage(m.image, m.imageHash); return; }
+    if (m.imageHash) {
+      var c = cachedImage(m.imageHash);
+      if (c) m.image = c; else missing = true;
+    }
+  });
+  return missing;
+}
+
+// FITUR: Performa — kunci snapshot murah untuk deteksi perubahan polling.
+// JANGAN stringify array yang membawa bytes gambar (2-4 MB per siklus);
+// kunci hanya berisi field data + hash gambar.
+function productsKey() {
+  return JSON.stringify(products.map(function (p) {
+    return [p.id, p.name, p.price, p.specialPrice, p.stock, p.category, p.visible, p.imageHash || null];
+  }));
+}
+function wargaKey(list) {
+  return JSON.stringify((list || []).map(function (w) {
+    return [w.id, w.name, w.phone, w.blok, w.houseNo, w.status, w.rejectReason || null, w.balance, w.photoHash || null];
+  }));
+}
+function ordersKey(orders) {
+  return JSON.stringify((orders || []).map(function (o) {
+    return [o.id, o.wargaId, o.total, o.status, o.method, o.slot, o.createdAt,
+      parseItems(o.items).map(function (it) { return [it.productId, it.name, it.qty, it.price, it.imageHash || null]; })];
+  }));
+}
+function threadsKey(threads) {
+  return JSON.stringify((threads || []).map(function (t) {
+    return [t.wargaId, t.wargaName, t.unreadAdmin, t.wargaPhotoHash || null,
+      t.lastMessage ? [t.lastMessage.text || '', t.lastMessage.sender || '', t.lastMessage.createdAt || ''] : null];
+  }));
+}
+function topupsKey(list) {
+  return JSON.stringify((list || []).map(function (t) {
+    return [t.id, t.wargaId, t.amount, t.method, t.status, t.createdAt, t.wargaName || null, t.proof ? 1 : 0];
+  }));
+}
+
+// FITUR: Performa — pola lite-dulu: endpoint lite (kecil, tanpa bytes
+// gambar) untuk data, endpoint penuh hanya bila ada gambar yang belum
+// di-cache. Gagal jaringan mengembalikan data lama (produk) atau daftar
+// kosong — tidak pernah mengosongkan tampilan yang sudah ada.
+async function loadProducts(forceFull) {
+  try {
+    if (forceFull || !products.length) {
+      var full = await api('/products');
+      if (!Array.isArray(full)) full = [];
+      mergeProductImages(full);
+      products = full;
+      return products;
+    }
+    var lite = await api('/products/lite');
+    if (!Array.isArray(lite)) lite = [];
+    if (mergeProductImages(lite)) {
+      var full2 = await api('/products');
+      if (Array.isArray(full2)) { mergeProductImages(full2); products = full2; return products; }
+    }
+    products = lite;
+    return products;
+  } catch (e) { return products; }
+}
+// FITUR: Performa — daftar warga (Admin) pola lite-dulu, seperti produk.
+async function loadWargaList(forceFull) {
+  try {
+    if (forceFull) {
+      var full = await api('/admin/warga');
+      if (!Array.isArray(full)) full = [];
+      mergeWargaPhotos(full);
+      return full;
+    }
+    var lite = await api('/admin/warga/lite');
+    if (!Array.isArray(lite)) lite = [];
+    if (mergeWargaPhotos(lite)) {
+      var full2 = await api('/admin/warga');
+      if (Array.isArray(full2)) { mergeWargaPhotos(full2); return full2; }
+    }
+    return lite;
+  } catch (e) { return []; }
+}
+// FITUR: Performa — daftar pesanan pola lite-dulu. path '/orders' atau
+// '/warga/<id>/orders'; q '' atau '?date=..&slot=..'.
+async function loadOrderList(path, q) {
+  try {
+    var lite = await api(path + '/lite' + (q || ''));
+    if (!Array.isArray(lite)) lite = [];
+    if (mergeOrderImages(lite)) {
+      var full = await api(path + (q || ''));
+      if (Array.isArray(full)) { mergeOrderImages(full); return full; }
+    }
+    return lite;
+  } catch (e) { return []; }
+}
+// FITUR: Performa — pesan chat pola lite-dulu; kembalikan {messages, unreadWarga}.
+async function loadChat(wargaId) {
+  try {
+    var lite = await api('/chat/' + wargaId + '/lite');
+    var msgs = (lite && lite.messages) || [];
+    if (mergeChatImages(msgs)) {
+      var full = await api('/chat/' + wargaId);
+      if (full && Array.isArray(full.messages)) { mergeChatImages(full.messages); return full; }
+    }
+    return lite;
+  } catch (e) { return { messages: [], unreadWarga: 0 }; }
+}
+// FITUR: Performa — thread chat pola lite-dulu.
+async function loadThreads() {
+  try {
+    var lite = await api('/chat/threads/lite');
+    if (!Array.isArray(lite)) lite = [];
+    if (mergeThreadPhotos(lite)) {
+      var full = await api('/chat/threads');
+      if (Array.isArray(full)) { mergeThreadPhotos(full); return full; }
+    }
+    return lite;
+  } catch (e) { return []; }
+}
 function visibleProducts() { return products.filter(function (p) { return p.visible !== 0 && p.visible !== false; }); }
 function findProduct(id) { return products.find(function (p) { return String(p.id) === String(id); }); }
 function effPrice(p, payment) { // FITUR: harga spesial bila bayar pakai saldo
