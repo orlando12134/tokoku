@@ -359,10 +359,13 @@ function renderShop(view) {
     var inCart = cart.find(function (c) { return String(c.productId) === String(p.id); });
     var qty = inCart ? inCart.qty : 0;
     var special = (p.specialPrice != null && Number(p.specialPrice) > 0) ? '<div class="product-special">Harga saldo: ' + fmtRp(p.specialPrice) + '</div>' : '';
+    var cardImg = photoSrc(p.imageHash, p.image);
     return '<div class="product-card">' +
       // FITUR: Klik gambar produk — buka detail produk (foto besar, harga,
       // stok, pilih jumlah, tambah ke keranjang). Tombol +/- cepat tetap ada.
-      (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.name) + '" class="clickable" onclick="openProductDetail(' + JSON.stringify(p.id) + ')" onerror="this.style.display=\'none\'">' : '') +
+      // FITUR: Skala 2026-11-14 — foto lewat /api/img/:hash (cache HP) +
+      // loading="lazy" (baru diunduh saat di-scroll ke layar).
+      (cardImg ? '<img src="' + esc(cardImg) + '" alt="' + esc(p.name) + '" class="clickable" loading="lazy" onclick="openProductDetail(' + JSON.stringify(p.id) + ')" onerror="this.style.display=\'none\'">' : '') +
       '<div class="product-name" style="cursor:pointer" onclick="openProductDetail(' + JSON.stringify(p.id) + ')">' + esc(p.name) + '</div>' +
       '<div class="product-price">' + fmtRp(p.price) + '</div>' + special +
       '<div class="muted" style="font-size:12px">Stok: ' + esc(p.stock) + (p.category ? ' · ' + esc(p.category) : '') + '</div>' +
@@ -410,8 +413,9 @@ function renderProductDetail() {
   var stock = Number(p.stock || 0);
   var special = (p.specialPrice != null && Number(p.specialPrice) > 0)
     ? '<div class="product-detail-special">Harga spesial bayar pakai saldo: ' + fmtRp(p.specialPrice) + '</div>' : '';
+  var detailImg = photoSrc(p.imageHash, p.image);
   openModal('<h2>' + esc(p.name) + '</h2>' +
-    (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.name) + '" class="product-detail-img" onerror="this.style.display=\'none\'">' : '') +
+    (detailImg ? '<img src="' + esc(detailImg) + '" alt="' + esc(p.name) + '" class="product-detail-img" onerror="this.style.display=\'none\'">' : '') +
     '<div class="product-detail-price">' + fmtRp(p.price) + '</div>' + special +
     '<p class="muted">Stok: ' + esc(stock) + (p.category ? ' · Kategori: ' + esc(p.category) : '') + '</p>' +
     '<div class="detail-qty-row"><button type="button" onclick="detailChangeQty(-1)" aria-label="Kurangi jumlah">−</button><b id="detailQtyVal">' + detailQty + '</b>' +

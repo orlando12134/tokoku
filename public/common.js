@@ -87,7 +87,9 @@ function initialsOf(name) {
 }
 function avatarHtml(w, cls) {
   var name = (w && (w.name || w.wargaName)) || '?';
-  var photo = w && (w.photo || w.wargaPhoto);
+  // FITUR: Skala 2026-11-14 — foto lewat /api/img/:hash (cache HP) bila
+  // hash ada; kalau tidak, pakai data URL yang tersedia.
+  var photo = photoSrc((w && (w.photoHash || w.wargaPhotoHash)), (w && (w.photo || w.wargaPhoto)));
   var c = 'avatar' + (cls ? ' ' + cls : '');
   if (photo) return '<img src="' + esc(photo) + '" alt="Foto ' + esc(name) + '" class="' + c + '">';
   return '<span class="' + c + ' avatar-initials" aria-hidden="true">' + esc(initialsOf(name)) + '</span>';
@@ -132,7 +134,8 @@ function viewHasFormFocus() {
 function chatBubblesHtml(msgs, mySender) {
   return (msgs || []).map(function (m) {
     var mine = m.sender === mySender;
-    return '<div class="bubble' + (mine ? ' mine' : '') + '">' + (m.text ? esc(m.text) : '') + (m.image ? '<img src="' + esc(m.image) + '" alt="Gambar chat">' : '') +
+    var mImg = photoSrc(m.imageHash, m.image);
+    return '<div class="bubble' + (mine ? ' mine' : '') + '">' + (m.text ? esc(m.text) : '') + (mImg ? '<img src="' + esc(mImg) + '" alt="Gambar chat" loading="lazy">' : '') +
       '<div class="muted" style="font-size:11px">' + fmtDate(m.createdAt) + '</div></div>';
   }).join('');
 }
@@ -147,7 +150,8 @@ function orderItemsHtml(items) {
   return '<div class="order-items">' + list.map(function (it) {
     var p = findProduct(it.productId);
     var name = it.name || (p ? p.name : 'Barang #' + it.productId);
-    var img = it.image ? '<img src="' + esc(it.image) + '" alt="' + esc(name) + '" onerror="this.style.display=\'none\'">' : '';
+    var imgSrc = photoSrc(it.imageHash, it.image);
+    var img = imgSrc ? '<img src="' + esc(imgSrc) + '" alt="' + esc(name) + '" loading="lazy" onerror="this.style.display=\'none\'">' : '';
     return '<div class="order-item">' + img + '<div class="order-item-info"><b>' + esc(name) + '</b><br><span class="muted">' + fmtRp(it.price) + ' × ' + it.qty + '</span></div>' +
       '<span class="order-item-price">' + fmtRp((Number(it.price) || 0) * (Number(it.qty) || 0)) + '</span></div>';
   }).join('') + '</div>';
@@ -276,6 +280,18 @@ function cacheImage(dataUrl, hash) {
 function cachedImage(hash) {
   return (hash && imgCache[hash]) || null;
 }
+// FITUR: Skala 2026-11-14 — foto disajikan sebagai file terpisah per hash
+// (/api/img/<hash>, header cache immutable). Browser mengunduh tiap foto
+// sekali saja lalu memakai ulang dari cache HP (seperti Shopee/Tokopedia).
+// photoSrc(hash, dataUrl): pakai URL bila hash ada, kalau tidak pakai data
+// URL yang tersedia (pratinjau upload / data lama sebelum backfill).
+function imgUrl(hash) {
+  if (!hash || !/^[0-9a-f]{12}$/.test(hash)) return null;
+  return '/api/img/' + hash;
+}
+function photoSrc(hash, dataUrl) {
+  return imgUrl(hash) || dataUrl || null;
+}
 // Gabungkan bytes gambar dari cache ke baris lite (baris yang sudah membawa
 // bytes dari endpoint penuh sekaligus disimpan ke cache). Kembalikan true
 // bila ada gambar yang masih hilang dan perlu diambil lewat endpoint penuh.
@@ -377,76 +393,59 @@ function topupsKey(list) {
 // di-cache. Gagal jaringan mengembalikan data lama (produk) atau daftar
 // kosong — tidak pernah mengosongkan tampilan yang sudah ada.
 async function loadProducts(forceFull) {
+  // FITUR: Skala 2026-11-14 — SELALU lite (hash saja); gambar diambil
+  // browser lewat /api/img/:hash (cache HP), jadi endpoint penuh TIDAK
+  // PERNAH lagi diunduh. forceFull dipertahankan demi pemanggil lama.
   try {
-    if (forceFull || !products.length) {
-      var full = await api('/products');
-      if (!Array.isArray(full)) full = [];
-      mergeProductImages(full);
-      products = full;
-      return products;
-    }
     var lite = await api('/products/lite');
     if (!Array.isArray(lite)) lite = [];
-    if (mergeProductImages(lite)) {
-      var full2 = await api('/products');
-      if (Array.isArray(full2)) { mergeProductImages(full2); products = full2; return products; }
-    }
+    mergeProductImages(lite); // isi data URL dari cache bila ada (opsional)
     products = lite;
     return products;
   } catch (e) { return products; }
 }
 // FITUR: Performa — daftar warga (Admin) pola lite-dulu, seperti produk.
 async function loadWargaList(forceFull) {
+  // FITUR: Skala 2026-11-14 — SELALU lite (hash saja); foto warga lewat
+  // /api/img/:hash (cache HP).
   try {
-    if (forceFull) {
-      var full = await api('/admin/warga');
-      if (!Array.isArray(full)) full = [];
-      mergeWargaPhotos(full);
-      return full;
-    }
     var lite = await api('/admin/warga/lite');
     if (!Array.isArray(lite)) lite = [];
-    if (mergeWargaPhotos(lite)) {
-      var full2 = await api('/admin/warga');
-      if (Array.isArray(full2)) { mergeWargaPhotos(full2); return full2; }
-    }
+    mergeWargaPhotos(lite);
     return lite;
   } catch (e) { return []; }
 }
 // FITUR: Performa — daftar pesanan pola lite-dulu. path '/orders' atau
 // '/warga/<id>/orders'; q '' atau '?date=..&slot=..'.
 async function loadOrderList(path, q) {
+  // FITUR: Skala 2026-11-14 — SELALU lite (hash saja); foto item pesanan
+  // lewat /api/img/:hash (cache HP).
   try {
     var lite = await api(path + '/lite' + (q || ''));
     if (!Array.isArray(lite)) lite = [];
-    if (mergeOrderImages(lite)) {
-      var full = await api(path + (q || ''));
-      if (Array.isArray(full)) { mergeOrderImages(full); return full; }
-    }
+    mergeOrderImages(lite);
     return lite;
   } catch (e) { return []; }
 }
 // FITUR: Performa — pesan chat pola lite-dulu; kembalikan {messages, unreadWarga}.
 async function loadChat(wargaId) {
+  // FITUR: Skala 2026-11-14 — SELALU lite (hash saja); gambar chat lewat
+  // /api/img/:hash (cache HP).
   try {
     var lite = await api('/chat/' + wargaId + '/lite');
     var msgs = (lite && lite.messages) || [];
-    if (mergeChatImages(msgs)) {
-      var full = await api('/chat/' + wargaId);
-      if (full && Array.isArray(full.messages)) { mergeChatImages(full.messages); return full; }
-    }
+    mergeChatImages(msgs);
     return lite;
   } catch (e) { return { messages: [], unreadWarga: 0 }; }
 }
 // FITUR: Performa — thread chat pola lite-dulu.
 async function loadThreads() {
+  // FITUR: Skala 2026-11-14 — SELALU lite (hash saja); foto warga lewat
+  // /api/img/:hash (cache HP).
   try {
     var lite = await api('/chat/threads/lite');
     if (!Array.isArray(lite)) lite = [];
-    if (mergeThreadPhotos(lite)) {
-      var full = await api('/chat/threads');
-      if (Array.isArray(full)) { mergeThreadPhotos(full); return full; }
-    }
+    mergeThreadPhotos(lite);
     return lite;
   } catch (e) { return []; }
 }

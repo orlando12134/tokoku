@@ -413,7 +413,7 @@ function renderAdminProducts(view) {
     }).join('') + '</div>';
   if (productEditId) {
     var p = findProduct(productEditId);
-    if (p) { $('prodName').value = p.name || ''; $('prodPrice').value = p.price || 0; $('prodSpecial').value = p.specialPrice || ''; $('prodStock').value = p.stock || 0; $('prodCategory').value = p.category || ''; if (p.image) $('prodPreview').innerHTML = '<img src="' + esc(p.image) + '" alt="Foto barang">'; }
+    if (p) { $('prodName').value = p.name || ''; $('prodPrice').value = p.price || 0; $('prodSpecial').value = p.specialPrice || ''; $('prodStock').value = p.stock || 0; $('prodCategory').value = p.category || ''; var pvImg = photoSrc(p.imageHash, p.image); if (pvImg) $('prodPreview').innerHTML = '<img src="' + esc(pvImg) + '" alt="Foto barang">'; }
   }
 }
 function onProductImageChange(input) {
@@ -526,9 +526,11 @@ async function showWargaHistory(id) {
       '<p><b>Total belanja: ' + fmtRp(h.totalSpent) + '</b></p>' +
       '<h3>Pesanan (' + orders.length + ')</h3>' + (orders.length ? orders.map(function (o) { return '<div class="list-item">' + fmtDate(o.createdAt || o.date) + ' · ' + esc(orderStatusLabel(o.status)) + ' · <b>' + fmtRp(o.total) + '</b></div>'; }).join('') : '<p class="muted">Belum ada pesanan.</p>') +
       '<h3>Top-up (' + topups.length + ')</h3>' + (topups.length ? topups.map(function (t) {
-        // FITUR: Bukti pembayaran — tautan "Lihat bukti" bila ada.
-        if (t.proof) lastTopupProofs[t.id] = t.proof;
-        return '<div class="list-item">' + fmtDate(t.createdAt) + ' · ' + fmtRp(t.amount) + ' · ' + esc(t.method || '') + ' · ' + esc(t.status || '') + (t.proof ? ' · <button type="button" class="linklike" onclick="showTopupProof(' + t.id + ')">Lihat bukti</button>' : '') + '</div>';
+        // FITUR: Bukti pembayaran — tautan "Lihat bukti" bila ada (foto
+        // lewat /api/img/:hash, cache HP).
+        var pr = photoSrc(t.proofHash, t.proof);
+        if (pr) lastTopupProofs[t.id] = pr;
+        return '<div class="list-item">' + fmtDate(t.createdAt) + ' · ' + fmtRp(t.amount) + ' · ' + esc(t.method || '') + ' · ' + esc(t.status || '') + (pr ? ' · <button type="button" class="linklike" onclick="showTopupProof(' + t.id + ')">Lihat bukti</button>' : '') + '</div>';
       }).join('') : '<p class="muted">Belum ada top-up.</p>'));
   } catch (err) { toast('Gagal memuat riwayat: ' + err.message, false); }
 }
@@ -541,10 +543,12 @@ async function renderAdminTopup(view) {
   if (!Array.isArray(list)) list = [];
   lastLive.topups = topupsKey(list);
   view.innerHTML = '<h1>Top-up Menunggu</h1>' + (list.length ? list.map(function (t) {
-    if (t.proof) lastTopupProofs[t.id] = t.proof;
-    return '<div class="card"><div class="warga-row">' + avatarHtml({ name: t.wargaName, photo: t.wargaPhoto }, 'avatar-sm') + '<div class="warga-info"><b>' + fmtRp(t.amount) + '</b> <span class="status-pill">' + esc(t.method || '') + '</span>' +
+    // FITUR: Skala 2026-11-14 — bukti + foto warga lewat /api/img/:hash.
+    var pr = photoSrc(t.proofHash, t.proof);
+    if (pr) lastTopupProofs[t.id] = pr;
+    return '<div class="card"><div class="warga-row">' + avatarHtml({ name: t.wargaName, photo: t.wargaPhoto, wargaPhotoHash: t.wargaPhotoHash }, 'avatar-sm') + '<div class="warga-info"><b>' + fmtRp(t.amount) + '</b> <span class="status-pill">' + esc(t.method || '') + '</span>' +
       '<p class="muted">' + esc(t.wargaName || t.name || ('Warga #' + t.wargaId)) + ' · ' + fmtDate(t.createdAt) + '</p></div></div>' +
-      (t.proof ? '<div class="proof-thumb"><img src="' + esc(t.proof) + '" alt="Bukti pembayaran" onclick="showTopupProof(' + t.id + ')"></div><p class="muted">Ketuk gambar untuk ukuran penuh.</p>' : '<p class="muted">Tanpa bukti pembayaran.</p>') +
+      (pr ? '<div class="proof-thumb"><img src="' + esc(pr) + '" alt="Bukti pembayaran" loading="lazy" onclick="showTopupProof(' + t.id + ')"></div><p class="muted">Ketuk gambar untuk ukuran penuh.</p>' : '<p class="muted">Tanpa bukti pembayaran.</p>') +
       '<div class="row"><button type="button" class="btn btn-small" onclick="approveTopup(' + t.id + ')">Setujui</button>' +
       '<button type="button" class="btn btn-danger btn-small" onclick="rejectTopup(' + t.id + ')">Tolak</button></div></div>';
   }).join('') : '<div class="card"><p>Tidak ada pengajuan top-up yang menunggu.</p></div>');
@@ -578,7 +582,7 @@ async function renderAdminChat(view) {
     var lm = t.lastMessage;
     var preview = !lm ? '' : (lm.text ? lm.text : (lm.image ? '📷 Gambar' : ''));
     // FITUR: Foto profil warga — foto (atau inisial) di daftar chat admin.
-    return '<div class="card" style="cursor:pointer" onclick="adminChatWargaId=' + t.wargaId + ';render()"><div class="warga-row">' + avatarHtml({ name: t.wargaName, photo: t.wargaPhoto }, 'avatar-sm') + '<div class="warga-info"><div class="row-between"><b>' + esc(t.wargaName || ('Warga #' + t.wargaId)) + '</b>' +
+    return '<div class="card" style="cursor:pointer" onclick="adminChatWargaId=' + t.wargaId + ';render()"><div class="warga-row">' + avatarHtml({ name: t.wargaName, photo: t.wargaPhoto, wargaPhotoHash: t.wargaPhotoHash }, 'avatar-sm') + '<div class="warga-info"><div class="row-between"><b>' + esc(t.wargaName || ('Warga #' + t.wargaId)) + '</b>' +
       (Number(t.unreadAdmin) > 0 ? '<span class="badge-inline">' + t.unreadAdmin + '</span>' : '') + '</div>' +
       '<p class="muted">' + esc(preview) + '</p></div></div></div>';
   }).join('') : '<div class="card"><p>Belum ada percakapan.</p></div>');
@@ -587,6 +591,7 @@ async function renderAdminChatThread(view, wargaId) {
   var data = { messages: [] };
   var name = '';
   var threadPhoto = null;
+  var threadPhotoHash = null;
   // FITUR: Performa — pesan + daftar thread paralel (sebelumnya berurutan).
   var threadData = await Promise.all([
     loadChat(wargaId).catch(function () { return { messages: [] }; }),
@@ -595,11 +600,11 @@ async function renderAdminChatThread(view, wargaId) {
   data = threadData[0] || { messages: [] };
   var threads = threadData[1] || [];
   var th = (threads || []).find(function (t) { return String(t.wargaId) === String(wargaId); });
-  if (th) { name = th.wargaName || ''; threadPhoto = th.wargaPhoto || null; }
+  if (th) { name = th.wargaName || ''; threadPhoto = th.wargaPhoto || null; threadPhotoHash = th.wargaPhotoHash || null; }
   var msgs = data.messages || [];
   lastAdminChatKey = msgs.map(function (m) { return m.id; }).join(',');
   view.innerHTML = '<button type="button" class="btn btn-secondary btn-small" onclick="adminChatWargaId=null;render()">← Semua chat</button>' +
-    '<div class="warga-row" style="margin:10px 0">' + avatarHtml({ name: name, photo: threadPhoto }, 'avatar-sm') + '<h1 style="margin:0">Chat — ' + esc(name || ('Warga #' + wargaId)) + '</h1></div><div class="card"><div class="chat-box" id="chatBox">' +
+    '<div class="warga-row" style="margin:10px 0">' + avatarHtml({ name: name, photo: threadPhoto, wargaPhotoHash: threadPhotoHash }, 'avatar-sm') + '<h1 style="margin:0">Chat — ' + esc(name || ('Warga #' + wargaId)) + '</h1></div><div class="card"><div class="chat-box" id="chatBox">' +
     (msgs.length ? chatBubblesHtml(msgs, 'admin') : '<p class="muted">Belum ada pesan.</p>') + '</div>' +
     '<div id="chatPreview" class="img-preview"></div>' +
     '<div class="chat-input-row"><label class="btn btn-secondary btn-small" style="padding:9px 12px">📎<input type="file" accept="image/*" hidden onchange="onChatImageChange(this)"></label>' +
