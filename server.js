@@ -278,6 +278,16 @@ function withProductHash(p) {
   if (!p) return p;
   return { ...p, imageHash: imgHash(p.image) };
 }
+// FITUR: Skala 2026-11-14 — simpan gambar sekali per hash ke tabel images
+// (INSERT OR IGNORE, idempotent). Dipanggil di setiap endpoint tulis yang
+// menyimpan gambar, dan sekali saat backfill di initDb. Di dalam transaksi
+// pakai run() (bentuk {sql, args}) — JANGAN ex.execute(sql, args).
+async function storeImage(dataUrl, ex) {
+  const h = imgHash(dataUrl);
+  if (!h || !dataUrl) return null;
+  await run('INSERT OR IGNORE INTO images (hash, data) VALUES (?, ?)', [h, String(dataUrl)], ex || null);
+  return h;
+}
 function withWargaHash(w) {
   if (!w) return w;
   return { ...w, photoHash: imgHash(w.photo) };
@@ -292,7 +302,10 @@ function parseOrderItems(items) {
 function orderWithHash(order, lite) {
   if (!order) return order;
   const items = parseOrderItems(order.items).map(function (it) {
-    const h = imgHash(it.image);
+    // FITUR: Skala 2026-11-14 — snapshot pesanan baru menyimpan hash saja
+    // (bukan bytes foto penuh); pesanan lama masih membawa bytes → hash
+    // dihitung dari bytes itu. Klien mengambil fotonya lewat /api/img/:hash.
+    const h = it.imageHash || imgHash(it.image);
     if (lite) return { ...it, image: undefined, imageHash: h };
     return { ...it, imageHash: h };
   });
@@ -387,6 +400,15 @@ const SCHEMA_SQL = `
     token_hash TEXT PRIMARY KEY,
     expires_at TEXT NOT NULL
   );
+
+  -- FITUR: Skala 2026-11-14 — gambar disimpan SEKALI per hash konten
+  -- (content-addressed) supaya bisa disajikan sebagai file terpisah lewat
+  -- /api/img/:hash dengan header cache: browser mengunduh tiap foto sekali
+  -- saja lalu memakai ulang dari cache HP (seperti Shopee/Tokopedia).
+  CREATE TABLE IF NOT EXISTS images (
+    hash TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+  );
 `;
 
 // FITUR: Inisialisasi database saat start — skema + migrasi + settings default.
@@ -408,6 +430,30 @@ async function initDb() {
   try {
     await client.execute('ALTER TABLE topups ADD COLUMN proof TEXT NULL');
   } catch { /* kolom proof sudah ada */ }
+
+  // FITUR: Skala 2026-11-14 — backfill tabel images dari gambar yang sudah
+  // ada (produk, foto warga, pesan chat, bukti top-up, snapshot pesanan).
+  // Sekali saja (flag imagesBackfilled di settings); gambar baru masuk
+  // lewat storeImage di tiap endpoint tulis. Bila backfill gagal di tengah
+  // jalan, flag tidak tersimpan dan backfill diulang saat start berikutnya.
+  const backfilled = await qOne("SELECT value FROM settings WHERE key = 'imagesBackfilled'");
+  if (!backfilled) {
+    try {
+      const existing = new Set((await q('SELECT hash FROM images')).map((r) => r.hash));
+      const put = async (dataUrl) => {
+        const h = imgHash(dataUrl);
+        if (h && !existing.has(h)) { await storeImage(dataUrl); existing.add(h); }
+      };
+      for (const r of await q('SELECT image FROM products WHERE image IS NOT NULL')) await put(r.image);
+      for (const r of await q('SELECT photo FROM warga WHERE photo IS NOT NULL')) await put(r.photo);
+      for (const r of await q('SELECT image FROM messages WHERE image IS NOT NULL')) await put(r.image);
+      for (const r of await q('SELECT proof FROM topups WHERE proof IS NOT NULL')) await put(r.proof);
+      for (const o of await q('SELECT items FROM orders')) {
+        for (const it of parseOrderItems(o.items)) if (it.image) await put(it.image);
+      }
+      await run("INSERT OR IGNORE INTO settings (key, value) VALUES ('imagesBackfilled', '1')");
+    } catch (e) { console.error('Backfill images gagal:', e.message); }
+  }
 
   // FITUR: Settings default — ongkir Rp2.000, gratis ongkir saldo mati, toko buka
   await client.execute(
@@ -667,6 +713,28 @@ async function handleApi(req, res, pathname, query) {
     return sendError(res, 401, 'Sesi admin tidak valid. Silakan login lagi.');
   }
 
+  // FITUR: Skala 2026-11-14 — sajikan gambar sebagai file terpisah yang
+  // bisa di-cache browser (seperti Shopee/Tokopedia). Alamat = hash konten
+  // (12 hex), jadi gambar yang sama selalu di alamat yang sama dan TIDAK
+  // PERNAH berubah → header immutable: browser mengunduh tiap foto sekali
+  // saja lalu memakai ulang dari cache HP. Publik (tanpa sesi): foto
+  // katalog memang publik, dan hash tidak bisa ditebak dari nama barang.
+  const imgMatch = pathname.match(/^\/api\/img\/([0-9a-f]{12})$/);
+  if (imgMatch && req.method === 'GET') {
+    const row = await qOne('SELECT data FROM images WHERE hash = ?', [imgMatch[1]]);
+    if (!row) return sendError(res, 404, 'Gambar tidak ditemukan');
+    const m = String(row.data).match(/^data:([^;]+);base64,([\s\S]*)$/);
+    if (!m) return sendError(res, 404, 'Gambar tidak ditemukan');
+    const buf = Buffer.from(m[2], 'base64');
+    res.writeHead(200, {
+      'Content-Type': m[1],
+      'Content-Length': buf.length,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Access-Control-Allow-Origin': '*',
+    });
+    return res.end(buf);
+  }
+
   // ---- Settings ------------------------------------------------------------
   if (pathname === '/api/settings' && req.method === 'GET') {
     return sendJson(res, 200, await getSettings());
@@ -719,6 +787,8 @@ async function handleApi(req, res, pathname, query) {
       ]
     );
     const row = await qOne('SELECT * FROM products WHERE id = ?', [numId(info.lastInsertRowid)]);
+    // FITUR: Skala 2026-11-14 — daftarkan foto ke tabel images (cache URL).
+    if (b.image) await storeImage(String(b.image));
     return sendJson(res, 201, row);
   }
   const productIdMatch = pathname.match(/^\/api\/products\/(\d+)$/);
@@ -748,6 +818,8 @@ async function handleApi(req, res, pathname, query) {
         id,
       ]
     );
+    // FITUR: Skala 2026-11-14 — daftarkan foto baru ke tabel images.
+    if (b.image) await storeImage(String(b.image));
     return sendJson(res, 200, await qOne('SELECT * FROM products WHERE id = ?', [id]));
   }
 
@@ -772,6 +844,8 @@ async function handleApi(req, res, pathname, query) {
       [name, phone, blok, houseNo, 'pending', photo, nowIso()]
     );
     const warga = await qOne('SELECT * FROM warga WHERE id = ?', [numId(info.lastInsertRowid)]);
+    // FITUR: Skala 2026-11-14 — daftarkan foto profil ke tabel images.
+    if (photo) await storeImage(photo);
     return sendJson(res, 201, { alreadyRegistered: false, warga });
   }
   // FITUR: Login warga by phone
@@ -780,7 +854,9 @@ async function handleApi(req, res, pathname, query) {
     const phone = String(b.phone || '').trim();
     if (!phone) return sendError(res, 400, 'Nomor HP wajib diisi');
     const warga = await qOne('SELECT * FROM warga WHERE phone = ?', [phone]);
-    return sendJson(res, 200, { found: !!warga, warga: warga || null });
+    // FITUR: Skala 2026-11-14 — foto profil diambil lewat /api/img/:hash.
+    const wargaOut = warga ? { ...warga, photoHash: imgHash(warga.photo) } : null;
+    return sendJson(res, 200, { found: !!warga, warga: wargaOut });
   }
 
   // FITUR: Foto profil warga — ubah foto/nama/blok/nomor rumah warga.
@@ -800,6 +876,8 @@ async function handleApi(req, res, pathname, query) {
       'UPDATE warga SET photo=?, name=?, blok=?, houseNo=? WHERE id=?',
       [photo, name, blok, houseNo, id]
     );
+    // FITUR: Skala 2026-11-14 — daftarkan foto profil baru ke tabel images.
+    if (photo) await storeImage(photo);
     return sendJson(res, 200, await qOne('SELECT * FROM warga WHERE id = ?', [id]));
   }
 
@@ -862,7 +940,14 @@ async function handleApi(req, res, pathname, query) {
     const totalSpent = orders
       .filter((o) => o.status !== 'dibatalkan')
       .reduce((sum, o) => sum + o.total, 0);
-    return sendJson(res, 200, { warga, orders, topups, totalSpent });
+    // FITUR: Skala 2026-11-14 — foto/bukti di riwayat diambil lewat
+    // /api/img/:hash (hash disertakan; bytes tetap ada untuk data lama).
+    return sendJson(res, 200, {
+      warga: withWargaHash(warga),
+      orders: orders.map(function (o) { return orderWithHash(o, false); }),
+      topups: topups.map(function (t) { return { ...t, proofHash: imgHash(t.proof) }; }),
+      totalSpent,
+    });
   }
 
   // ---- Top-up ---------------------------------------------------------------
@@ -897,6 +982,8 @@ async function handleApi(req, res, pathname, query) {
       [wargaId, amount, method, b.proof ? String(b.proof) : null, nowIso()]
     );
     const topup = await qOne('SELECT * FROM topups WHERE id = ?', [numId(info.lastInsertRowid)]);
+    // FITUR: Skala 2026-11-14 — daftarkan bukti pembayaran ke tabel images.
+    if (b.proof) await storeImage(String(b.proof));
     return sendJson(res, 201, { ok: true, topup });
   }
   if (pathname === '/api/topup/pending' && req.method === 'GET') {
@@ -907,7 +994,11 @@ async function handleApi(req, res, pathname, query) {
       'FROM topups t JOIN warga w ON w.id = t.wargaId ' +
       "WHERE t.status = 'pending' ORDER BY t.createdAt ASC, t.id ASC"
     );
-    return sendJson(res, 200, rows);
+    return sendJson(res, 200, rows.map(function (t) {
+      // FITUR: Skala 2026-11-14 — bukti + foto warga diambil lewat
+      // /api/img/:hash (cache), bukan bytes di JSON.
+      return { ...t, proofHash: imgHash(t.proof), wargaPhotoHash: imgHash(t.wargaPhoto) };
+    }));
   }
   const topupApproveMatch = pathname.match(/^\/api\/topup\/(\d+)\/approve$/);
   if (topupApproveMatch && req.method === 'POST') {
@@ -1010,10 +1101,12 @@ async function handleApi(req, res, pathname, query) {
       }
       const unitPrice = (payment === 'saldo' && product.specialPrice !== null && product.specialPrice !== undefined)
         ? product.specialPrice : product.price;
-      // FITUR: Snapshot gambar barang di data pesanan — supaya gambar tetap
-      // tampil di Pesanan Warga/Admin walau barangnya nanti diubah/dihapus.
-      // Tidak perlu ubah skema DB: items disimpan sebagai JSON string.
-      items.push({ productId, name: product.name, qty, price: unitPrice, image: product.image || null });
+      // FITUR: Skala 2026-11-14 — snapshot pesanan menyimpan HASH foto saja
+      // (bukan bytes penuh): fotonya diambil klien lewat /api/img/:hash dari
+      // tabel images (sudah terdaftar saat barang dibuat/diubah + backfill).
+      // Gambar tetap tampil walau barang diubah/dihapus, dan riwayat pesanan
+      // tidak lagi menduplikasi bytes foto per item.
+      items.push({ productId, name: product.name, qty, price: unitPrice, imageHash: imgHash(product.image) });
       subtotal += unitPrice * qty;
     }
 
@@ -1328,6 +1421,8 @@ async function handleApi(req, res, pathname, query) {
       'VALUES (?, ?, ?, ?, ?, ?, ?)',
       [wargaId, sender, text, image, nowIso(), readByAdmin, readByWarga]
     );
+    // FITUR: Skala 2026-11-14 — daftarkan gambar chat ke tabel images.
+    if (image) await storeImage(image);
     return sendJson(res, 201, await qOne('SELECT * FROM messages WHERE id = ?', [numId(info.lastInsertRowid)]));
   }
   // FITUR: Tandai semua pesan di thread sudah dibaca oleh pihak yang membuka

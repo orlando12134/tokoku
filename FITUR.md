@@ -237,3 +237,9 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 ## Perbaikan celah chat (2026-11-14)
 - [x] Kirim chat sebagai 'admin' wajib sesi login admin (401 tanpa sesi); warga tetap bisa chat tanpa sesi
 - [x] Tandai-dibaca sebagai 'admin' wajib sesi login admin
+
+## Foto cache HP — skala 200 warga / 1000 barang (2026-11-14)
+- [x] Foto disajikan sebagai file terpisah /api/img/:hash dengan header cache immutable (diunduh sekali, dipakai ulang dari cache HP)
+- [x] Foto katalog lazy-load (baru diunduh saat di-scroll)
+- [x] Snapshot pesanan menyimpan hash foto saja (riwayat tidak menduplikasi bytes foto)
+- [x] Backfill gambar lama ke tabel images saat start (sekali saja)
