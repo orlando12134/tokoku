@@ -220,3 +220,9 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 - Server ini satu proses; data live di Turso (libSQL, gratis) sehingga
   bertahan tiap deploy/restart — cocok untuk skala komplek (10–20 warga).
   File `data/tokoku.db` hanya fallback lokal.
+
+
+## Performa menu (2026-11-14)
+- [x] Klik menu cepat: fetch paralel + endpoint lite + cache gambar (produk 2,1 MB → lite <1 KB; pesanan 3,8 MB → lite <1 KB; gambar hanya diunduh sekali per sesi)
+- [x] Polling 10 detik tetap live, tidak menumpuk (pollBusy) dan tidak mengunduh ulang gambar
+- [x] Foto produk/warga/pesanan/chat tetap tampil; foto baru langsung terlihat lewat polling tanpa refresh

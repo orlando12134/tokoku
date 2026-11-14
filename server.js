@@ -18,6 +18,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('node:crypto');
 const { createClient } = require('@libsql/client');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -77,6 +78,44 @@ async function run(sql, args = [], ex = null) {
 
 function numId(v) {
   return typeof v === 'bigint' ? Number(v) : v;
+}
+
+// FITUR: Performa 2026-11-14 — hash gambar untuk endpoint lite + cache
+// gambar klien. Hash = MD5 12 hex pertama dari string data-URL gambar
+// (encoding base64 deterministik, jadi gambar yang sama selalu hash yang
+// sama); null bila tidak ada gambar. Endpoint lite mengembalikan hash
+// sebagai pengganti bytes base64 sehingga daftar hanya beberapa KB;
+// klien mengunduh gambar penuh sekali per sesi dan menyimpannya di cache
+// menurut hash. Tidak ada perubahan skema DB dan tidak ada data yang
+// diubah (snapshot pesanan tetap menyimpan gambar penuh di DB).
+function imgHash(s) {
+  if (!s) return null;
+  try { return crypto.createHash('md5').update(String(s)).digest('hex').slice(0, 12); }
+  catch (e) { return null; }
+}
+function withProductHash(p) {
+  if (!p) return p;
+  return { ...p, imageHash: imgHash(p.image) };
+}
+function withWargaHash(w) {
+  if (!w) return w;
+  return { ...w, photoHash: imgHash(w.photo) };
+}
+// Item pesanan disimpan sebagai JSON string; lite mengganti image dengan
+// imageHash (tanpa bytes), full menambah imageHash di samping image.
+function parseOrderItems(items) {
+  if (Array.isArray(items)) return items;
+  if (typeof items === 'string') { try { return JSON.parse(items); } catch (e) { return []; } }
+  return [];
+}
+function orderWithHash(order, lite) {
+  if (!order) return order;
+  const items = parseOrderItems(order.items).map(function (it) {
+    const h = imgHash(it.image);
+    if (lite) return { ...it, image: undefined, imageHash: h };
+    return { ...it, imageHash: h };
+  });
+  return { ...order, items: JSON.stringify(items) };
 }
 
 // FITUR: Transaksi atomik via libsql (client.transaction('write')).
@@ -359,7 +398,23 @@ async function handleApi(req, res, pathname, query) {
     const rows = await q(
       'SELECT * FROM products ORDER BY name COLLATE NOCASE ASC'
     );
-    return sendJson(res, 200, rows);
+    return sendJson(res, 200, rows.map(withProductHash));
+  }
+  // FITUR: Performa 2026-11-14 — daftar produk ringan tanpa bytes gambar
+  // (dipakai refresh/polling; gambar diambil dari cache klien menurut
+  // imageHash). Kolom image tetap dibaca dari Turso untuk menghitung hash
+  // (transfer dalam region Singapura, cepat) tapi TIDAK dikirim ke klien.
+  if (pathname === '/api/products/lite' && req.method === 'GET') {
+    const rows = await q(
+      'SELECT * FROM products ORDER BY name COLLATE NOCASE ASC'
+    );
+    return sendJson(res, 200, rows.map(function (p) {
+      return {
+        id: p.id, name: p.name, price: p.price, specialPrice: p.specialPrice,
+        stock: p.stock, category: p.category, visible: p.visible,
+        imageHash: imgHash(p.image),
+      };
+    }));
   }
   if (pathname === '/api/products' && req.method === 'POST') {
     const b = await readBody(req);
@@ -470,7 +525,23 @@ async function handleApi(req, res, pathname, query) {
     const rows = await q(
       'SELECT * FROM warga ORDER BY createdAt DESC, id DESC'
     );
-    return sendJson(res, 200, rows);
+    return sendJson(res, 200, rows.map(withWargaHash));
+  }
+  // FITUR: Performa 2026-11-14 — daftar warga ringan tanpa foto (foto
+  // diambil dari cache klien menurut photoHash). Kolom photo tetap dibaca
+  // untuk menghitung hash tapi TIDAK dikirim ke klien.
+  if (pathname === '/api/admin/warga/lite' && req.method === 'GET') {
+    const rows = await q(
+      'SELECT * FROM warga ORDER BY createdAt DESC, id DESC'
+    );
+    return sendJson(res, 200, rows.map(function (w) {
+      return {
+        id: w.id, name: w.name, phone: w.phone, blok: w.blok,
+        houseNo: w.houseNo, status: w.status, rejectReason: w.rejectReason,
+        balance: w.balance, createdAt: w.createdAt,
+        photoHash: imgHash(w.photo),
+      };
+    }));
   }
   const wargaApproveMatch = pathname.match(/^\/api\/admin\/warga\/(\d+)\/approve$/);
   if (wargaApproveMatch && req.method === 'POST') {
@@ -716,7 +787,27 @@ async function handleApi(req, res, pathname, query) {
       `SELECT * FROM orders ${where} ORDER BY createdAt DESC, id DESC`,
       params
     );
-    return sendJson(res, 200, rows);
+    return sendJson(res, 200, rows.map(function (o) { return orderWithHash(o, false); }));
+  }
+  // FITUR: Performa 2026-11-14 — daftar pesanan ringan (item tanpa bytes
+  // gambar snapshot, pakai imageHash; gambar diambil dari cache klien).
+  if (pathname === '/api/orders/lite' && req.method === 'GET') {
+    const conditions = [];
+    const params = [];
+    if (query.date) {
+      conditions.push('substr(createdAt, 1, 10) = ?');
+      params.push(query.date);
+    }
+    if (query.slot) {
+      conditions.push('slot = ?');
+      params.push(query.slot);
+    }
+    const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+    const rows = await q(
+      `SELECT * FROM orders ${where} ORDER BY createdAt DESC, id DESC`,
+      params
+    );
+    return sendJson(res, 200, rows.map(function (o) { return orderWithHash(o, true); }));
   }
 
   const wargaOrdersMatch = pathname.match(/^\/api\/warga\/(\d+)\/orders$/);
@@ -726,7 +817,17 @@ async function handleApi(req, res, pathname, query) {
       'SELECT * FROM orders WHERE wargaId = ? ORDER BY createdAt DESC, id DESC',
       [wargaId]
     );
-    return sendJson(res, 200, rows);
+    return sendJson(res, 200, rows.map(function (o) { return orderWithHash(o, false); }));
+  }
+  // FITUR: Performa 2026-11-14 — pesanan warga ringan (tanpa bytes gambar).
+  const wargaOrdersLiteMatch = pathname.match(/^\/api\/warga\/(\d+)\/orders\/lite$/);
+  if (wargaOrdersLiteMatch && req.method === 'GET') {
+    const wargaId = Number(wargaOrdersLiteMatch[1]);
+    const rows = await q(
+      'SELECT * FROM orders WHERE wargaId = ? ORDER BY createdAt DESC, id DESC',
+      [wargaId]
+    );
+    return sendJson(res, 200, rows.map(function (o) { return orderWithHash(o, true); }));
   }
 
   // FITUR: Batalkan pesanan (warga pemilik, hanya saat status 'baru')
@@ -837,7 +938,8 @@ async function handleApi(req, res, pathname, query) {
 
   // ---- Chat toko ------------------------------------------------------------
   // FITUR: Daftar thread chat — per warga, badge belum dibaca admin
-  if (pathname === '/api/chat/threads' && req.method === 'GET') {
+  // (lite = tanpa foto warga, pakai wargaPhotoHash; foto diambil dari cache klien)
+  async function loadChatThreads(lite) {
     // FITUR: Foto profil warga — ikut dikirim supaya Admin melihat foto
     // warga di daftar chat (null bila warga belum pasang foto).
     const wargaList = await q('SELECT id, name, photo FROM warga ORDER BY name COLLATE NOCASE ASC');
@@ -856,19 +958,27 @@ async function handleApi(req, res, pathname, query) {
     );
     const unreadByWarga = {};
     for (const r of unreadRows) unreadByWarga[r.wargaId] = r.c;
-    const threads = wargaList.map((w) => {
+    return wargaList.map((w) => {
       const last = lastByWarga[w.id] || null;
-      return {
+      const t = {
         wargaId: w.id,
         wargaName: w.name,
-        wargaPhoto: w.photo || null,
         unreadAdmin: unreadByWarga[w.id] || 0,
         lastMessage: last
           ? { text: last.text, image: !!last.image, sender: last.sender, createdAt: last.createdAt }
           : null,
       };
+      if (lite) t.wargaPhotoHash = imgHash(w.photo);
+      else { t.wargaPhoto = w.photo || null; t.wargaPhotoHash = imgHash(w.photo); }
+      return t;
     });
-    return sendJson(res, 200, threads);
+  }
+  if (pathname === '/api/chat/threads' && req.method === 'GET') {
+    return sendJson(res, 200, await loadChatThreads(false));
+  }
+  // FITUR: Performa 2026-11-14 — thread chat ringan (tanpa foto warga).
+  if (pathname === '/api/chat/threads/lite' && req.method === 'GET') {
+    return sendJson(res, 200, await loadChatThreads(true));
   }
   const chatMatch = pathname.match(/^\/api\/chat\/(\d+)$/);
   if (chatMatch && req.method === 'GET') {
@@ -881,7 +991,33 @@ async function handleApi(req, res, pathname, query) {
       "SELECT COUNT(*) AS c FROM messages WHERE wargaId = ? AND sender = 'admin' AND readByWarga = 0",
       [wargaId]
     );
-    return sendJson(res, 200, { messages, unreadWarga: unread.c });
+    return sendJson(res, 200, {
+      messages: messages.map(function (m) { return { ...m, imageHash: imgHash(m.image) }; }),
+      unreadWarga: unread.c,
+    });
+  }
+  // FITUR: Performa 2026-11-14 — pesan chat ringan (tanpa bytes gambar).
+  const chatLiteMatch = pathname.match(/^\/api\/chat\/(\d+)\/lite$/);
+  if (chatLiteMatch && req.method === 'GET') {
+    const wargaId = Number(chatLiteMatch[1]);
+    const messages = await q(
+      'SELECT * FROM messages WHERE wargaId = ? ORDER BY createdAt ASC, id ASC',
+      [wargaId]
+    );
+    const unread = await qOne(
+      "SELECT COUNT(*) AS c FROM messages WHERE wargaId = ? AND sender = 'admin' AND readByWarga = 0",
+      [wargaId]
+    );
+    return sendJson(res, 200, {
+      messages: messages.map(function (m) {
+        return {
+          id: m.id, wargaId: m.wargaId, sender: m.sender, text: m.text,
+          createdAt: m.createdAt, readByAdmin: m.readByAdmin,
+          readByWarga: m.readByWarga, imageHash: imgHash(m.image),
+        };
+      }),
+      unreadWarga: unread.c,
+    });
   }
   if (chatMatch && req.method === 'POST') {
     const wargaId = Number(chatMatch[1]);

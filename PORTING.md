@@ -204,3 +204,13 @@ dan `server.js` (MIME `.webmanifest` → application/manifest+json).
   valid + content-type benar, semua ikon + sw.js 200, SW terdaftar &
   aktif, tag PWA di Warga dan Admin, plus regresi kategori + pesanan
   ujung ke ujung saldo 100.000 → 94.700).
+
+
+## Performa — semua menu lelet (2026-11-14)
+**Laporan Andrik:** "kenapa semua menu ketika di klik kok lelet banget".
+**Penyebab (terukur):** setiap klik memanggil `render()` yang `await` BERURUTAN: `loadSettings()` + `loadProducts()` (2,1 MB) + `refreshWarga()` + `refreshUnread()` + fetch tab — satu klik 4–6 detik. Payload: `/api/products` 2,1 MB (99,9% gambar base64), `/api/orders` 3,8 MB, `/api/warga/:id/orders` 1,3 MB, `/api/chat/threads` 221 KB, `/api/admin/warga` 221 KB. Polling 10 detik mengulang rantai yang sama termasuk unduh ulang 2,1 MB, tanpa penjaga tumpang-tindih.
+**Perbaikan (server.js):** endpoint lite baru — `/api/products/lite`, `/api/admin/warga/lite`, `/api/orders/lite`, `/api/warga/:id/orders/lite`, `/api/chat/threads/lite`, `/api/chat/:id/lite` — sama seperti endpoint penuh tapi tanpa bytes gambar, diganti hash MD5 12 hex dari string data-URL (`imgHash`, `node:crypto`, tanpa dependensi baru). Endpoint penuh juga mendapat field hash (`imageHash`/`photoHash`/`wargaPhotoHash`). Tidak ada perubahan skema DB; snapshot pesanan tetap menyimpan gambar penuh di DB.
+**Perbaikan (common.js):** satu cache gambar beralamat hash (`imgCache`), helper merge per entitas, smart loader pola lite-dulu (`loadProducts(forceFull)`, `loadWargaList`, `loadOrderList(path, q)`, `loadChat`, `loadThreads`), kunci snapshot murah (`productsKey`, `wargaKey`, `ordersKey`, `threadsKey`, `topupsKey`) — jangan pernah `JSON.stringify` array bergambar.
+**Perbaikan (warga.js/admin.js):** `render()` dan `pollLive` memakai `Promise.all` untuk fetch independen; `pollBusy` mencegah siklus polling menumpuk; semua tab memakai smart loader; admin `submitProduct` memanggil `loadProducts(true)` sekali setelah simpan supaya cache foto diperbarui.
+**Jebakan saat uji lokal:** klik tab nav di Playwright mobile gagal hit-test karena `innerHeight` (892) ≠ viewport (844) sehingga titik klik jatuh di luar viewport dan tertutup konten; di browser asli tombolnya kena hit-test dengan benar dan klik JS berfungsi. Di test, klik nav memakai `evaluate(el.click())`.
+**Uji lokal (2026-11-14):** 22/22 lulus di Chromium 390px + latensi /api 600ms: semua tab warga+admin, pesanan saldo + batal (saldo kembali), top-up disetujui, tambah barang lewat form + foto, foto produk berubah lewat polling tanpa refresh, klik ulang tidak mengunduh ulang `/api/products` penuh (2x total = sekali per halaman), lite 678 byte vs penuh 2.295.375 byte (produk), lite 441 byte vs penuh 1.147.913 byte (pesanan).
