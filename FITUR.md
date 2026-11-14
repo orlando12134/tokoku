@@ -233,3 +233,7 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 - [x] Sesi 30 hari (token acak, hanya hash-nya disimpan), muat ulang tetap masuk, tombol Keluar, ubah password (mencabut sesi perangkat lain)
 - [x] Kunci 15 menit setelah 5x login gagal; semua endpoint admin 401 tanpa sesi; warga tetap tanpa login
 - [x] Password awal publik di-seed dari env Render `ADMIN_PASSWORD_HASH` (lihat PORTING.md); hapus env setelah dipakai
+
+## Perbaikan celah chat (2026-11-14)
+- [x] Kirim chat sebagai 'admin' wajib sesi login admin (401 tanpa sesi); warga tetap bisa chat tanpa sesi
+- [x] Tandai-dibaca sebagai 'admin' wajib sesi login admin

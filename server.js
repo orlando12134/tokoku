@@ -1311,6 +1311,12 @@ async function handleApi(req, res, pathname, query) {
     if (!['admin', 'warga'].includes(sender)) {
       return sendError(res, 400, "Pengirim harus 'admin' atau 'warga'");
     }
+    // FITUR: Keamanan Admin 2026-11-14 — pesan sebagai 'admin' wajib sesi
+    // login admin; kalau tidak, siapa pun bisa menyamar sebagai toko.
+    // Pesan warga ('warga') tetap tanpa sesi (warga belum punya auth).
+    if (sender === 'admin' && !(await requireAdmin(req))) {
+      return sendError(res, 401, 'Sesi admin tidak valid. Silakan login lagi.');
+    }
     const text = String(b.text || '').trim();
     const image = b.image ? String(b.image) : null;
     if (!text && !image) return sendError(res, 400, 'Pesan kosong');
@@ -1330,6 +1336,12 @@ async function handleApi(req, res, pathname, query) {
     const wargaId = Number(chatReadMatch[1]);
     const b = await readBody(req);
     const by = String(b.by || '');
+    // FITUR: Keamanan Admin 2026-11-14 — menandai dibaca sebagai 'admin'
+    // wajib sesi login admin (kalau tidak, siapa pun bisa menghapus lencana
+    // pesan belum dibaca milik admin).
+    if (by === 'admin' && !(await requireAdmin(req))) {
+      return sendError(res, 401, 'Sesi admin tidak valid. Silakan login lagi.');
+    }
     if (by === 'admin') {
       await run("UPDATE messages SET readByAdmin = 1 WHERE wargaId = ? AND sender = 'warga'", [wargaId]);
     } else if (by === 'warga') {
