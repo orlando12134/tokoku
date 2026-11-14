@@ -80,6 +80,187 @@ function numId(v) {
   return typeof v === 'bigint' ? Number(v) : v;
 }
 
+// ============================================================================
+// FITUR: Keamanan Admin 2026-11-14 — password + authenticator (TOTP).
+// - Password disimpan sebagai hash scrypt + salt (format scrypt$<saltHex>$<hashHex>),
+//   TIDAK PERNAH plaintext.
+// - TOTP: secret base32 (20 byte acak), kode 6 digit HMAC-SHA1 langkah 30 detik,
+//   diterima langkah sekarang ±1 (toleransi jam).
+// - Kredensial admin tinggal di tabel settings (kunci admin_password_hash,
+//   admin_totp_secret, admin_totp_enabled) — getSettings() hanya mengembalikan
+//   tiga kunci toko, jadi hash/secret TIDAK PERNAH keluar lewat /api/settings.
+// - Sesi: token acak 32 byte, hanya sha256-nya yang disimpan di tabel
+//   admin_sessions (berlaku 30 hari); token mentah hanya diberikan sekali
+//   saat login.
+// - Password awal di-seed dari env ADMIN_PASSWORD_HASH (hash scrypt, BUKAN
+//   password mentah) saat start — env menang selama masih terpasang, jadi
+//   HAPUS env itu setelah password awal berhasil dipakai, supaya ubah password
+//   lewat aplikasi tidak tertimpa restart. Bila terkunci: pasang lagi env
+//   tersebut (hash password baru) dan/atau ADMIN_RESET_TOTP=1 (menghapus
+//   secret TOTP sehingga authenticator bisa diaktifkan ulang), deploy,
+//   lalu hapus env-nya.
+// ============================================================================
+const ADMIN_SESSION_DAYS = 30;
+const LOGIN_MAX_FAILS = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const loginAttempts = new Map(); // ip -> { count, lockedUntil }
+let lastSessionCleanup = 0;
+
+const B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(buf) {
+  let out = '';
+  let bits = 0, value = 0;
+  for (const b of buf) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) { out += B32_ALPHABET[(value >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+function base32Decode(str) {
+  const clean = String(str || '').toUpperCase().replace(/=+$/, '').replace(/[^A-Z2-7]/g, '');
+  const bytes = [];
+  let bits = 0, value = 0;
+  for (const ch of clean) {
+    value = (value << 5) | B32_ALPHABET.indexOf(ch);
+    bits += 5;
+    if (bits >= 8) { bytes.push((value >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  return Buffer.from(bytes);
+}
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(String(password), salt, 64);
+  return 'scrypt$' + salt.toString('hex') + '$' + hash.toString('hex');
+}
+function verifyPassword(password, stored) {
+  try {
+    const parts = String(stored || '').split('$');
+    if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+    const salt = Buffer.from(parts[1], 'hex');
+    const expect = Buffer.from(parts[2], 'hex');
+    const actual = crypto.scryptSync(String(password), salt, 64);
+    return actual.length === expect.length && crypto.timingSafeEqual(actual, expect);
+  } catch (e) { return false; }
+}
+function totpCode(secretB32, stepOffset) {
+  const key = base32Decode(secretB32);
+  const counter = Math.floor(Date.now() / 1000 / 30) + (stepOffset || 0);
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(counter));
+  const hmac = crypto.createHmac('sha1', key).update(msg).digest();
+  const off = hmac[hmac.length - 1] & 0x0f;
+  const code = ((hmac[off] & 0x7f) << 24) | ((hmac[off + 1] & 0xff) << 16) |
+    ((hmac[off + 2] & 0xff) << 8) | (hmac[off + 3] & 0xff);
+  return String(code % 1000000).padStart(6, '0');
+}
+function verifyTotp(secretB32, code) {
+  const c = String(code || '').replace(/\D/g, '');
+  if (!/^\d{6}$/.test(c)) return false;
+  return [-1, 0, 1].some(function (o) { return totpCode(secretB32, o) === c; });
+}
+function sha256Hex(s) {
+  return crypto.createHash('sha256').update(String(s)).digest('hex');
+}
+async function getAdminSetting(key) {
+  const row = await qOne('SELECT value FROM settings WHERE key = ?', [key]);
+  return row ? row.value : null;
+}
+async function setAdminSetting(key, value) {
+  await run(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ' +
+    'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    [key, value === null || value === undefined ? '' : String(value)]
+  );
+}
+async function deleteAdminSetting(key) {
+  await run('DELETE FROM settings WHERE key = ?', [key]);
+}
+async function getAdminAuth() {
+  const passwordHash = await getAdminSetting('admin_password_hash');
+  const totpSecret = await getAdminSetting('admin_totp_secret');
+  const totpEnabled = (await getAdminSetting('admin_totp_enabled')) === '1';
+  return { passwordHash, totpSecret, totpEnabled };
+}
+function clientIp(req) {
+  const fwd = req.headers && req.headers['x-forwarded-for'];
+  if (fwd) return String(fwd).split(',')[0].trim();
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+function loginLocked(ip) {
+  const rec = loginAttempts.get(ip);
+  return !!(rec && rec.lockedUntil && Date.now() < rec.lockedUntil);
+}
+function recordLoginFail(ip) {
+  const rec = loginAttempts.get(ip) || { count: 0, lockedUntil: 0 };
+  rec.count += 1;
+  if (rec.count >= LOGIN_MAX_FAILS) {
+    rec.lockedUntil = Date.now() + LOGIN_LOCK_MS;
+    rec.count = 0;
+  }
+  loginAttempts.set(ip, rec);
+}
+function resetLoginRate(ip) { loginAttempts.delete(ip); }
+async function createAdminSession() {
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + ADMIN_SESSION_DAYS * 24 * 3600 * 1000).toISOString();
+  await run('INSERT INTO admin_sessions (token_hash, expires_at) VALUES (?, ?)', [sha256Hex(token), expiresAt]);
+  return { token, expiresAt };
+}
+function bearerToken(req) {
+  const h = (req.headers && (req.headers.authorization || req.headers['x-admin-token'])) || '';
+  return String(h).replace(/^Bearer\s+/i, '').trim();
+}
+async function requireAdmin(req) {
+  try {
+    const token = bearerToken(req);
+    if (!token) return false;
+    // Bersihkan sesi kedaluwarsa paling cepat sejam sekali (bukan tiap request).
+    if (Date.now() - lastSessionCleanup > 3600 * 1000) {
+      lastSessionCleanup = Date.now();
+      await run('DELETE FROM admin_sessions WHERE expires_at <= ?', [nowIso()]).catch(function () {});
+    }
+    const row = await qOne('SELECT token_hash FROM admin_sessions WHERE token_hash = ?', [sha256Hex(token)]);
+    return !!row;
+  } catch (e) { return false; }
+}
+async function deleteAdminSession(req) {
+  const token = bearerToken(req);
+  if (token) await run('DELETE FROM admin_sessions WHERE token_hash = ?', [sha256Hex(token)]).catch(function () {});
+}
+// Endpoint admin yang wajib sesi login (endpoint warga tetap publik).
+function adminProtected(pathname, method) {
+  if (pathname === '/api/settings' && method === 'POST') return true;
+  if (pathname === '/api/products' && method === 'POST') return true;
+  if (/^\/api\/products\/\d+$/.test(pathname) && method === 'PUT') return true;
+  if (pathname === '/api/admin/warga' && method === 'GET') return true;
+  if (pathname === '/api/admin/warga/lite' && method === 'GET') return true;
+  if (/^\/api\/admin\/warga\/\d+\/(approve|reject|history)$/.test(pathname)) return true;
+  if (pathname === '/api/topup/pending' && method === 'GET') return true;
+  if (/^\/api\/topup\/\d+\/(approve|reject)$/.test(pathname) && method === 'POST') return true;
+  if (pathname === '/api/orders' && method === 'GET') return true;
+  if (pathname === '/api/orders/lite' && method === 'GET') return true;
+  if (/^\/api\/orders\/\d+\/status$/.test(pathname) && method === 'POST') return true;
+  if (/^\/api\/orders\/\d+\/struk$/.test(pathname) && method === 'GET') return true;
+  if (pathname === '/api/chat/threads' && method === 'GET') return true;
+  if (pathname === '/api/chat/threads/lite' && method === 'GET') return true;
+  return false;
+}
+// Seed/reset dari env saat start (lihat komentar blok di atas).
+async function seedAdminFromEnv() {
+  const hash = process.env.ADMIN_PASSWORD_HASH || '';
+  if (hash) {
+    await setAdminSetting('admin_password_hash', hash);
+    console.log('Admin: password awal di-seed dari env ADMIN_PASSWORD_HASH');
+  }
+  if (process.env.ADMIN_RESET_TOTP === '1') {
+    await deleteAdminSetting('admin_totp_secret');
+    await setAdminSetting('admin_totp_enabled', '0');
+    console.log('Admin: TOTP di-reset dari env ADMIN_RESET_TOTP');
+  }
+}
+
 // FITUR: Performa 2026-11-14 — hash gambar untuk endpoint lite + cache
 // gambar klien. Hash = MD5 12 hex pertama dari string data-URL gambar
 // (encoding base64 deterministik, jadi gambar yang sama selalu hash yang
@@ -201,6 +382,11 @@ const SCHEMA_SQL = `
     readByAdmin INTEGER NOT NULL DEFAULT 0,
     readByWarga INTEGER NOT NULL DEFAULT 0
   );
+
+  CREATE TABLE IF NOT EXISTS admin_sessions (
+    token_hash TEXT PRIMARY KEY,
+    expires_at TEXT NOT NULL
+  );
 `;
 
 // FITUR: Inisialisasi database saat start — skema + migrasi + settings default.
@@ -253,7 +439,7 @@ function sendJson(res, status, obj) {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   });
   res.end(body);
 }
@@ -309,7 +495,13 @@ function escHtml(s) {
 async function getSettings() {
   const rows = await q('SELECT key, value FROM settings');
   const out = { deliveryFee: 2000, freeShippingBalance: 0, storeOpen: 1 };
-  for (const r of rows) out[r.key] = toInt(r.value, out[r.key]);
+  // FITUR: Keamanan Admin — hanya tiga kunci toko yang dikembalikan; kunci
+  // admin_* (hash password, secret TOTP) TIDAK PERNAH keluar lewat API ini.
+  for (const r of rows) {
+    if (r.key === 'deliveryFee' || r.key === 'freeShippingBalance' || r.key === 'storeOpen') {
+      out[r.key] = toInt(r.value, out[r.key]);
+    }
+  }
   return out;
 }
 
@@ -384,6 +576,97 @@ function serveStatic(req, res, urlPath) {
 // FITUR: Router API
 // ============================================================================
 async function handleApi(req, res, pathname, query) {
+  // ---- Keamanan Admin (password + authenticator TOTP) -----------------------
+  // Status publik: klien perlu tahu apakah password sudah ada & TOTP aktif
+  // (untuk menampilkan kolom kode). TIDAK membocorkan apa pun selain itu.
+  if (pathname === '/api/admin/status' && req.method === 'GET') {
+    const auth = await getAdminAuth();
+    return sendJson(res, 200, { hasPassword: !!auth.passwordHash, totpEnabled: auth.totpEnabled });
+  }
+  if (pathname === '/api/admin/login' && req.method === 'POST') {
+    const ip = clientIp(req);
+    if (loginLocked(ip)) return sendError(res, 429, 'Terlalu banyak percobaan gagal. Coba lagi 15 menit lagi.');
+    const body = await readBody(req);
+    const auth = await getAdminAuth();
+    // Pesan error sengaja generik: jangan bocorkan apakah password atau kode
+    // yang salah, atau apakah password sudah diatur.
+    if (!auth.passwordHash || !verifyPassword(body.password, auth.passwordHash)) {
+      recordLoginFail(ip);
+      return sendError(res, 401, 'Password atau kode salah.');
+    }
+    if (auth.totpEnabled && !verifyTotp(auth.totpSecret, body.totp)) {
+      recordLoginFail(ip);
+      return sendError(res, 401, 'Password atau kode salah.');
+    }
+    resetLoginRate(ip);
+    const sess = await createAdminSession();
+    return sendJson(res, 200, { ok: true, token: sess.token, expiresAt: sess.expiresAt, totpEnabled: auth.totpEnabled });
+  }
+  if (pathname === '/api/admin/logout' && req.method === 'POST') {
+    await deleteAdminSession(req);
+    return sendJson(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/me' && req.method === 'GET') {
+    if (!(await requireAdmin(req))) return sendError(res, 401, 'Sesi admin tidak valid. Silakan login lagi.');
+    const auth = await getAdminAuth();
+    return sendJson(res, 200, { ok: true, totpEnabled: auth.totpEnabled });
+  }
+  if (pathname === '/api/admin/totp/setup' && req.method === 'POST') {
+    if (!(await requireAdmin(req))) return sendError(res, 401, 'Sesi admin tidak valid. Silakan login lagi.');
+    const auth = await getAdminAuth();
+    let secret = auth.totpSecret;
+    if (!secret) {
+      secret = base32Encode(crypto.randomBytes(20));
+      await setAdminSetting('admin_totp_secret', secret);
+    }
+    const otpauthUrl = 'otpauth://totp/' + encodeURIComponent('tokoku admin') +
+      '?secret=' + secret + '&issuer=' + encodeURIComponent('tokoku');
+    return sendJson(res, 200, { secret, otpauthUrl, enabled: auth.totpEnabled });
+  }
+  if (pathname === '/api/admin/totp/verify' && req.method === 'POST') {
+    if (!(await requireAdmin(req))) return sendError(res, 401, 'Sesi admin tidak valid. Silakan login lagi.');
+    const body = await readBody(req);
+    const auth = await getAdminAuth();
+    if (!auth.totpSecret || !verifyTotp(auth.totpSecret, body.code)) {
+      return sendError(res, 400, 'Kode authenticator salah.');
+    }
+    await setAdminSetting('admin_totp_enabled', '1');
+    return sendJson(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/totp/disable' && req.method === 'POST') {
+    if (!(await requireAdmin(req))) return sendError(res, 401, 'Sesi admin tidak valid. Silakan login lagi.');
+    const body = await readBody(req);
+    const auth = await getAdminAuth();
+    if (!auth.passwordHash || !verifyPassword(body.password, auth.passwordHash) ||
+        (auth.totpEnabled && !verifyTotp(auth.totpSecret, body.code))) {
+      return sendError(res, 401, 'Password atau kode salah.');
+    }
+    await deleteAdminSetting('admin_totp_secret');
+    await setAdminSetting('admin_totp_enabled', '0');
+    return sendJson(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/password/change' && req.method === 'POST') {
+    if (!(await requireAdmin(req))) return sendError(res, 401, 'Sesi admin tidak valid. Silakan login lagi.');
+    const body = await readBody(req);
+    const auth = await getAdminAuth();
+    if (!auth.passwordHash || !verifyPassword(body.currentPassword, auth.passwordHash) ||
+        (auth.totpEnabled && !verifyTotp(auth.totpSecret, body.totp))) {
+      return sendError(res, 401, 'Password atau kode salah.');
+    }
+    const next = String(body.newPassword || '');
+    if (next.length < 8) return sendError(res, 400, 'Password baru minimal 8 karakter.');
+    await setAdminSetting('admin_password_hash', hashPassword(next));
+    // Keluar dari perangkat lain (sesi lain dihapus; sesi saat ini dipertahankan).
+    await run('DELETE FROM admin_sessions WHERE token_hash <> ?', [sha256Hex(bearerToken(req))]);
+    return sendJson(res, 200, { ok: true });
+  }
+  // FITUR: Keamanan Admin — endpoint admin wajib sesi login; endpoint warga
+  // tetap publik (katalog, login/daftar warga, pesanan warga, chat warga,
+  // saldo/top-up warga).
+  if (adminProtected(pathname, req.method) && !(await requireAdmin(req))) {
+    return sendError(res, 401, 'Sesi admin tidak valid. Silakan login lagi.');
+  }
+
   // ---- Settings ------------------------------------------------------------
   if (pathname === '/api/settings' && req.method === 'GET') {
     return sendJson(res, 200, await getSettings());
@@ -1070,7 +1353,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       });
       return res.end();
     }
@@ -1093,6 +1376,7 @@ const server = http.createServer(async (req, res) => {
 // baru dengarkan port. Bila init gagal, proses keluar dengan error jelas.
 async function main() {
   await initDb();
+  await seedAdminFromEnv();
   server.listen(PORT, () => {
     console.log(`tokoku berjalan di http://localhost:${PORT}`);
     console.log(USE_TURSO ? 'Database: Turso (remote)' : `Database: file lokal ${DB_PATH}`);

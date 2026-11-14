@@ -226,3 +226,10 @@ pesanan, saldo, dan chat warga masuk ke aplikasi Admin.
 - [x] Klik menu cepat: fetch paralel + endpoint lite + cache gambar (produk 2,1 MB → lite <1 KB; pesanan 3,8 MB → lite <1 KB; gambar hanya diunduh sekali per sesi)
 - [x] Polling 10 detik tetap live, tidak menumpuk (pollBusy) dan tidak mengunduh ulang gambar
 - [x] Foto produk/warga/pesanan/chat tetap tampil; foto baru langsung terlihat lewat polling tanpa refresh
+
+## Keamanan Admin (2026-11-14)
+- [x] Login admin: password (hash scrypt + salt, tidak pernah plaintext) + kode authenticator 6 digit (TOTP) bila aktif
+- [x] Authenticator: setup secret base32 + entri manual di aplikasi authenticator (tanpa QR pihak ketiga), verifikasi kode untuk mengaktifkan, nonaktifkan wajib password + kode
+- [x] Sesi 30 hari (token acak, hanya hash-nya disimpan), muat ulang tetap masuk, tombol Keluar, ubah password (mencabut sesi perangkat lain)
+- [x] Kunci 15 menit setelah 5x login gagal; semua endpoint admin 401 tanpa sesi; warga tetap tanpa login
+- [x] Password awal publik di-seed dari env Render `ADMIN_PASSWORD_HASH` (lihat PORTING.md); hapus env setelah dipakai
